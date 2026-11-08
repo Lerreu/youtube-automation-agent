@@ -406,6 +406,12 @@ class YouTubeAutomationAgent {
   setupAPI() {
     this.app.use(this.rejectCrossSiteWrites());
     this.app.use(express.json({ limit: '1mb' }));
+    // Express 5 leaves req.body undefined when no parser ran; keep the Express 4
+    // default ({}) for JSON routes. Media upload routes parse their own raw body.
+    this.app.use((req, _res, next) => {
+      if (req.body === undefined && !req.is(['image/*', 'video/*'])) req.body = {};
+      next();
+    });
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
     if (!process.env.API_KEY) {
