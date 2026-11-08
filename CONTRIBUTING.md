@@ -40,7 +40,9 @@ youtube-automation-agent/
 ├── index.js         # Express server and agent startup
 ├── walkthrough.js   # guided setup (npm run walkthrough)
 ├── setup.js         # classic setup (npm run setup)
-├── api/routes/      # HTTP routes by domain (registered from index.js setupAPI)
+├── api/             # HTTP routes by domain (api/routes), API key + CSRF checks, request validation
+├── orchestration/   # generation jobs and human review/approval (mixed into the main agent)
+├── database/        # db.js (connection), migrations.js, repositories/ by domain
 ├── test.js          # system test cases (SystemTest; `node test.js` runs them directly)
 └── tests/           # node:test entry point (npm test)
 ```
