@@ -6,7 +6,7 @@ Thanks for contributing! This project moves fast and PRs are reviewed regularly 
 
 1. **One concern per PR.** A focused 50-line PR merges in days; a 6,000-line PR mixing features can't be responsibly reviewed. If your change has independent parts, stack them as separate PRs.
 2. **Don't regenerate `package-lock.json`** unless your PR is specifically about dependencies. Lockfile churn hides real changes and is a supply-chain review burden.
-3. **Lint and tests must pass** — CI runs `npm run lint` and `npm test` on every PR. If you fix a bug, add a regression test in `test.js`: a `SystemTest` method plus an entry in `getTests()`.
+3. **Lint and tests must pass** — CI runs `npm run lint` and `npm test` on every PR. If you fix a bug, add a regression test: a method in the matching `tests/cases/*.js` file plus an entry in `getTests()` in `test.js`.
 4. **Rebase on `master`** before opening or updating a PR.
 5. **Describe how you tested it.** "Ran `npm start`, generated a video with Gemini-only credentials, verified a real .mp4 appeared in `data/videos/`" beats any amount of code description.
 
@@ -43,8 +43,8 @@ youtube-automation-agent/
 ├── api/             # HTTP routes by domain (api/routes), API key + CSRF checks, request validation
 ├── orchestration/   # generation jobs and human review/approval (mixed into the main agent)
 ├── database/        # db.js (connection), migrations.js, repositories/ by domain
-├── test.js          # system test cases (SystemTest; `node test.js` runs them directly)
-└── tests/           # node:test entry point (npm test)
+├── test.js          # SystemTest runner + getTests() list (`node test.js` runs them directly)
+└── tests/           # node:test entry (system.test.js) and test cases by domain (cases/)
 ```
 
 ## Extending
