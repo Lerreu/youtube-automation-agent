@@ -1,4 +1,4 @@
-const sqlite3 = require('sqlite3').verbose();
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
@@ -18,7 +18,12 @@ class Database {
       await fs.mkdir(path.dirname(this.dbPath), { recursive: true });
       
       // Connect to database
-      this.db = new sqlite3.Database(this.dbPath);
+      // Foreign keys stay off, as they were with the sqlite3 driver: Shorts are
+      // scheduled with a clip ID in publish_schedule.production_id, which the
+      // schema declares as a reference to productions.
+      this.db = new DatabaseSync(this.dbPath, { enableForeignKeyConstraints: false });
+      // Wait instead of failing if a backup or another tool briefly locks the file.
+      this.db.exec('PRAGMA busy_timeout = 5000');
       
       // Create tables
       await this.createTables();
@@ -2817,52 +2822,41 @@ class Database {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
   }
 
-  async executeQuery(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.run(query, params, function(error) {
-        if (error) {
-          reject(error);
-        } else {
-          resolve({ lastID: this.lastID, changes: this.changes });
-        }
-      });
+  // node:sqlite is synchronous; these helpers keep the async interface the
+  // rest of the code uses. Rows are copied to plain objects (node:sqlite
+  // returns null-prototype objects).
+  bindParams(params) {
+    const list = Array.isArray(params) ? params : [params];
+    return list.map(value => {
+      if (value === undefined) return null;
+      if (typeof value === 'boolean') return value ? 1 : 0;
+      if (value instanceof Date) return value.getTime();
+      return value;
     });
+  }
+
+  async executeQuery(query, params = []) {
+    const result = this.db.prepare(query).run(...this.bindParams(params));
+    return { lastID: Number(result.lastInsertRowid), changes: Number(result.changes) };
   }
 
   async getRow(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.get(query, params, (error, row) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(row);
-        }
-      });
-    });
+    const row = this.db.prepare(query).get(...this.bindParams(params));
+    return row ? { ...row } : undefined;
   }
 
   async getAllRows(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.all(query, params, (error, rows) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(rows || []);
-        }
-      });
-    });
+    return this.db.prepare(query).all(...this.bindParams(params)).map(row => ({ ...row }));
   }
 
   async close() {
     if (this.db) {
-      return new Promise((resolve) => {
-        this.db.close((error) => {
-          if (error) {
-            this.logger.error('Error closing database:', error);
-          }
-          resolve();
-        });
-      });
+      try {
+        this.db.close();
+      } catch (error) {
+        this.logger.error('Error closing database:', error);
+      }
+      this.db = null;
     }
   }
 
@@ -2895,7 +2889,7 @@ class Database {
       this.getRow('SELECT COUNT(*) as count FROM content_strategies'),
       this.getRow('SELECT COUNT(*) as count FROM scripts'),
       this.getRow('SELECT COUNT(*) as count FROM productions'),
-      this.getRow('SELECT COUNT(*) as count FROM publish_schedule WHERE status = "published"'),
+      this.getRow("SELECT COUNT(*) as count FROM publish_schedule WHERE status = 'published'"),
       this.getRow('SELECT COUNT(*) as count FROM analytics_reports')
     ]);
 

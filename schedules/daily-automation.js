@@ -508,7 +508,7 @@ class DailyAutomation {
 
   async logAutomationEvent(eventType, status, data = {}) {
     await this.db.executeQuery(
-      'INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime("now"))',
+      "INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime('now'))",
       [eventType, status, JSON.stringify(data)]
     );
   }

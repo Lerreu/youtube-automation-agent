@@ -172,7 +172,7 @@ class SystemTest {
     await db.initialize();
 
     await db.executeQuery(
-      'INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime("now"))',
+      "INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime('now'))",
       ['test_event', 'success', JSON.stringify({ ok: true })]
     );
 
