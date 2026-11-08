@@ -14,14 +14,9 @@ class SystemTest {
     this.testResults = {};
   }
 
-  async runAllTests() {
-    // Mutating API routes require API_KEY; give the in-process API tests one.
-    if (!process.env.API_KEY) process.env.API_KEY = 'test-suite-key';
-
-    console.log(chalk.cyan.bold('\n🧪 YouTube Automation Agent - System Test'));
-    console.log(chalk.gray('═'.repeat(60)));
-    
-    const tests = [
+  // Every system test, in run order. Used by both runners (node test.js and node --test).
+  getTests() {
+    return [
       { name: 'Database Connection', test: () => this.testDatabase() },
       { name: 'Production Persistence', test: () => this.testProductionPersistence() },
       { name: 'Automation Events Table', test: () => this.testAutomationEventsTable() },
@@ -76,6 +71,16 @@ class SystemTest {
       { name: 'Engagement Sync Schedule', test: () => this.testEngagementSyncSchedule() },
       { name: 'Growth Experiment Refresh Schedule', test: () => this.testGrowthExperimentRefreshSchedule() }
     ];
+  }
+
+  async runAllTests() {
+    // Mutating API routes require API_KEY; give the in-process API tests one.
+    if (!process.env.API_KEY) process.env.API_KEY = 'test-suite-key';
+
+    console.log(chalk.cyan.bold('\n🧪 YouTube Automation Agent - System Test'));
+    console.log(chalk.gray('═'.repeat(60)));
+    
+    const tests = this.getTests();
 
     let passed = 0;
     let failed = 0;
