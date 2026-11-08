@@ -7,6 +7,7 @@
     "start": "node index.js",
     "setup": "node setup.js",
     "walkthrough": "node walkthrough.js",
+    "auth": "node modern-auth.js",
     "growth:snapshot": "node scripts/growth/snapshot-github.js",
     "docs:screenshots": "node scripts/docs/capture-screenshots.js",
     "scheduler": "node schedules/daily-automation.js",
@@ -51,5 +52,12 @@
   },
   "engines": {
     "node": ">=18.17.0"
+  },
+  "allowScripts": {
+    "@google/genai@2.10.0": true,
+    "ffmpeg-static@5.3.0": true,
+    "protobufjs@7.6.4": true,
+    "sharp@0.34.5": true,
+    "sqlite3@5.1.7": true
   }
 }

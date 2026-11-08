@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const fs = require('fs').promises;
 const { Logger } = require('./utils/logger');
 const { Database } = require('./database/db');
@@ -17,6 +18,7 @@ const { DailyAutomation } = require('./schedules/daily-automation');
 const { OperatorService } = require('./utils/operator-service');
 const { AutonomousChannelOperator } = require('./utils/autonomous-channel-operator');
 const { ActivationMetrics } = require('./utils/activation-metrics');
+const { detectSyntheticMedia } = require('./utils/synthetic-media');
 const { AnonymousTelemetry } = require('./utils/anonymous-telemetry');
 const { ProductionReadinessService } = require('./utils/production-readiness-service');
 const { GenerationRecoveryService, GENERATION_STAGES } = require('./utils/generation-recovery-service');
@@ -218,14 +220,38 @@ class YouTubeAutomationAgent {
 
   requireAPIKey() {
     return (req, res, next) => {
-      if (!process.env.API_KEY) {
-        return next();
+      const expected = process.env.API_KEY;
+      if (!expected) {
+        // Fail closed: routes that generate, approve or publish are never open.
+        return res.status(503).json({
+          success: false,
+          code: 'API_KEY_NOT_CONFIGURED',
+          error: 'Set API_KEY in .env to enable generation, approval, and publishing routes'
+        });
       }
 
-      if (req.get('x-api-key') !== process.env.API_KEY) {
+      const provided = Buffer.from(String(req.get('x-api-key') || ''));
+      const wanted = Buffer.from(expected);
+      if (provided.length !== wanted.length || !crypto.timingSafeEqual(provided, wanted)) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
+      return next();
+    };
+  }
+
+  rejectCrossSiteWrites() {
+    const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+    return (req, res, next) => {
+      if (safeMethods.has(req.method)) return next();
+      const fetchSite = req.get('sec-fetch-site');
+      if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+        return res.status(403).json({ success: false, code: 'CROSS_SITE_REQUEST', error: 'Cross-site requests are not allowed' });
+      }
+      const origin = req.get('origin');
+      if (origin && origin !== `${req.protocol}://${req.get('host')}`) {
+        return res.status(403).json({ success: false, code: 'CROSS_SITE_REQUEST', error: 'Cross-site requests are not allowed' });
+      }
       return next();
     };
   }
@@ -377,11 +403,12 @@ class YouTubeAutomationAgent {
     };
   }
   setupAPI() {
+    this.app.use(this.rejectCrossSiteWrites());
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
     if (!process.env.API_KEY) {
-      this.logger.warn('API_KEY is not set; mutating API routes are unprotected');
+      this.logger.warn('API_KEY is not set; generation, approval, and publishing routes are disabled until you set it in .env');
     }
     
     // Main dashboard route
@@ -1247,7 +1274,7 @@ class YouTubeAutomationAgent {
     });
 
     this.app.put('/api/settings', protect, async (req, res) => {
-      const allowed = ['approval_required', 'notification_enabled', 'channel_timezone', 'max_daily_posts', 'content_buffer_days'];
+      const allowed = ['notification_enabled', 'channel_timezone', 'max_daily_posts', 'content_buffer_days'];
       for (const key of allowed) {
         if (req.body?.[key] !== undefined) await this.db.setSetting(key, String(req.body[key]));
       }
@@ -1539,14 +1566,10 @@ class YouTubeAutomationAgent {
 
     // Step 6: Quality and approval gate
     return this.runGenerationStage(jobId, 'quality_review', 90, async () => {
-      const approvalRequired = await this.db.getSetting('approval_required') !== 'false';
-      const packagingExperiment = approvalRequired
-        ? await this.preparePackagingExperiment(thumbnail, productionData, seoData, script)
-        : null;
+      // Human approval is mandatory: generated content always stops at review.
+      const packagingExperiment = await this.preparePackagingExperiment(thumbnail, productionData, seoData, script);
       const quality = await this.operator.runQualityChecks(productionData, profile);
-      const reviewStatus = quality.passed
-        ? (approvalRequired ? 'needs_review' : 'approved')
-        : 'needs_attention';
+      const reviewStatus = quality.passed ? 'needs_review' : 'needs_attention';
       await this.db.saveContentReview(contentId, {
         status: reviewStatus,
         qualityChecks: quality.checks,
@@ -1556,23 +1579,17 @@ class YouTubeAutomationAgent {
           selectedThumbnailVariant: 0
         } : {},
         reviewNotes: quality.passed ? null : `Blocking checks failed: ${quality.blockingFailures.join(', ')}`,
-        reviewedAt: approvalRequired ? null : new Date().toISOString()
+        reviewedAt: null
       });
 
-      let scheduleEntry = null;
-      if (reviewStatus === 'approved') {
-        scheduleEntry = await this.agents.publishing.scheduleContent(productionData);
-        await this.db.updateProductionStatus(contentId, scheduleEntry ? 'scheduled' : productionData.status);
-      } else {
-        await this.db.updateProductionStatus(contentId, reviewStatus);
-        await this.operator.notify({
-          type: 'review_required',
-          level: quality.passed ? 'info' : 'warning',
-          title: quality.passed ? 'Content ready for review' : 'Content needs attention',
-          message: `${script.title} ${quality.passed ? 'is ready for approval' : 'failed one or more quality checks'}`,
-          data: { contentId, qualityScore: quality.score }
-        });
-      }
+      await this.db.updateProductionStatus(contentId, reviewStatus);
+      await this.operator.notify({
+        type: 'review_required',
+        level: quality.passed ? 'info' : 'warning',
+        title: quality.passed ? 'Content ready for review' : 'Content needs attention',
+        message: `${script.title} ${quality.passed ? 'is ready for approval' : 'failed one or more quality checks'}`,
+        data: { contentId, qualityScore: quality.score }
+      });
 
       return {
         contentId,
@@ -1580,7 +1597,7 @@ class YouTubeAutomationAgent {
         status: productionData.status,
         reviewStatus,
         qualityScore: quality.score,
-        scheduledFor: scheduleEntry ? scheduleEntry.publishTime : null
+        scheduledFor: null
       };
     });
   }
@@ -1786,7 +1803,8 @@ class YouTubeAutomationAgent {
       estimatedDuration: bundle.estimated_duration,
       privacyStatus: editorData.privacyStatus || process.env.DEFAULT_PRIVACY_STATUS || 'private',
       provenance: bundle.provenance,
-      containsSyntheticMedia: bundle.provenance?.containsSyntheticMedia === true,
+      // The operator can add a disclosure, but cannot remove one required by AI-generated media.
+      containsSyntheticMedia: bundle.provenance?.containsSyntheticMedia === true || detectSyntheticMedia(bundle).containsSyntheticMedia,
       scenes: bundle.scenes || []
     };
     const profile = await this.db.getChannelProfile() || {};
@@ -1850,13 +1868,13 @@ class YouTubeAutomationAgent {
     }
     
     const PORT = process.env.PORT || 3456;
-    // Loopback by default: mutating routes are open whenever API_KEY is unset,
-    // so the dashboard must not be reachable from the network unless asked.
+    // Loopback by default: read-only dashboard routes need no key, so keep them
+    // off the network unless HOST is set explicitly.
     const HOST = process.env.HOST || '127.0.0.1';
     this.app.listen(PORT, HOST, () => {
       console.log(chalk.green(`\n✅ YouTube Automation Agent running on ${HOST}:${PORT}`));
-      if (!isLoopbackHost(HOST) && !process.env.API_KEY) {
-        console.log(chalk.yellow(`⚠️  HOST=${HOST} exposes the dashboard to your network without API_KEY. Set API_KEY in .env to protect generation, approval, and publishing routes.`));
+      if (!isLoopbackHost(HOST)) {
+        console.log(chalk.yellow(`⚠️  HOST=${HOST} exposes the dashboard to your network. Read-only routes are visible to anyone who can reach it.`));
       }
       console.log(chalk.gray('─'.repeat(50)));
       console.log(chalk.white('📊 Dashboard: ') + chalk.cyan(`http://localhost:${PORT}`));

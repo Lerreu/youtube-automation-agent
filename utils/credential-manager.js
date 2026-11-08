@@ -43,6 +43,7 @@ class CredentialManager {
   }
 
   async loadTokens() {
+    this.youtubeAuth = null;
     try {
       const data = await fs.readFile(this.tokensPath, 'utf8');
       this.tokens = JSON.parse(data);
@@ -84,7 +85,7 @@ class CredentialManager {
         type: 'input',
         name: 'redirectUri',
         message: 'Enter your redirect URI:',
-        default: 'http://localhost:8080/oauth2callback'
+        default: 'http://127.0.0.1'
       }
     ]);
 
@@ -103,43 +104,11 @@ class CredentialManager {
   }
 
   async authenticateYouTube() {
-    const oauth2Client = new google.auth.OAuth2(
-      this.credentials.youtube.client_id,
-      this.credentials.youtube.client_secret,
-      this.credentials.youtube.redirect_uris[0]
-    );
-
-    const scopes = [
-      'https://www.googleapis.com/auth/youtube.upload',
-      'https://www.googleapis.com/auth/youtube',
-      'https://www.googleapis.com/auth/youtube.readonly',
-      'https://www.googleapis.com/auth/yt-analytics.readonly',
-      'https://www.googleapis.com/auth/youtube.force-ssl'
-    ];
-
-    const authUrl = oauth2Client.generateAuthUrl({
-      access_type: 'offline',
-      scope: scopes,
-    });
-
-    console.log(chalk.cyan('\n🔗 Please visit this URL to authorize the application:'));
-    console.log(chalk.blue(authUrl));
-
-    const { code } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'code',
-        message: 'Enter the authorization code:',
-        validate: input => input.length > 0 || 'Authorization code is required'
-      }
-    ]);
-
-    const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens);
-
-    this.tokens.youtube = tokens;
-    await this.saveTokens();
-
+    // Single OAuth flow (loopback redirect + state + PKCE) lives in modern-auth.js.
+    const { ModernAuth } = require('../modern-auth');
+    const auth = new ModernAuth({ configDir: path.dirname(this.tokensPath) });
+    this.tokens.youtube = await auth.authenticate();
+    this.youtubeAuth = null;
     console.log(chalk.green('✅ YouTube authentication completed!'));
   }
 
@@ -147,15 +116,27 @@ class CredentialManager {
     if (!this.credentials.youtube || !this.tokens.youtube) {
       throw new Error('YouTube credentials not configured');
     }
+    if (this.youtubeAuth) return this.youtubeAuth;
 
     const oauth2Client = new google.auth.OAuth2(
       this.credentials.youtube.client_id,
       this.credentials.youtube.client_secret,
-      this.credentials.youtube.redirect_uris[0]
+      this.credentials.youtube.redirect_uris?.[0]
     );
-
     oauth2Client.setCredentials(this.tokens.youtube);
+    // Persist refreshed access tokens; Google omits refresh_token on refresh, so keep the old one.
+    oauth2Client.on('tokens', tokens => this.persistRefreshedTokens(tokens));
+    this.youtubeAuth = oauth2Client;
     return oauth2Client;
+  }
+
+  async persistRefreshedTokens(tokens) {
+    this.tokens.youtube = { ...this.tokens.youtube, ...tokens };
+    try {
+      await this.saveTokens();
+    } catch (error) {
+      this.logger.error('Failed to persist refreshed YouTube tokens:', error);
+    }
   }
 
   getYouTubeClient() {

@@ -6,6 +6,7 @@ Most problems show up in the startup capability check (the `🔎 Capability chec
 | --- | --- |
 | `Missing credentials for: an AI provider` | Configure any one text provider with `npm run walkthrough` or `npm run credentials:setup`. OpenAI isn't required. |
 | Google sign-in shows `Error 403: access_denied` | Add your Google account as a test user under **Google Auth Platform → Audience**. While the app is in Testing mode, Google expires the sign-in after 7 days. |
+| YouTube calls fail with `invalid_grant` | The refresh token expired or was revoked (in Testing mode this happens after 7 days). Run `npm run auth` to sign in again. Refreshed access tokens are saved automatically. |
 | No video is produced, or it's marked simulated | Read the ✗ lines in the startup capability check. Make sure you ran `npx playwright install chromium` and that FFmpeg is available (`npm install` fetches it, or set `FFMPEG_PATH`). |
 | Images or thumbnails are missing | Image generation needs OpenAI, or Gemini with billing enabled. The content review panel shows the provider's exact error. |
 | Narration failed (for example, ElevenLabs HTTP 400) | Check the key, its credits, and that `ELEVENLABS_VOICE_ID` is a voice in your account, then use **Regenerate narration only**. |

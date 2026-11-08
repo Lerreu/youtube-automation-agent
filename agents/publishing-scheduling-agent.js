@@ -4,6 +4,7 @@ const fsSync = require('fs');
 const path = require('path');
 const { Logger } = require('../utils/logger');
 const { assertValidYouTubeMetadata } = require('../utils/youtube-metadata-validator');
+const { detectSyntheticMedia } = require('../utils/synthetic-media');
 
 class PublishingSchedulingAgent {
   constructor(db, credentials) {
@@ -123,10 +124,13 @@ class PublishingSchedulingAgent {
         }
       }
       this.logger.info(`Publishing content: ${contentId}`);
-      
+
       let scheduleEntry = this.publishQueue.find(entry =>
         entry.productionId === contentId || entry.id === contentId
       );
+      // Human approval is enforced here, at the last step before upload, so no
+      // caller (scheduler, queue, publish-now, Shorts) can bypass it.
+      await this.assertHumanApproval(scheduleEntry?.metadata?.sourceProductionId || contentId, productionBundle);
       if (!scheduleEntry && this.db.getLatestScheduleEntry) {
         scheduleEntry = await this.db.getLatestScheduleEntry(contentId);
       }
@@ -196,6 +200,23 @@ class PublishingSchedulingAgent {
     }
   }
 
+  async assertHumanApproval(productionId, loadedBundle = null) {
+    const bundle = loadedBundle?.id === productionId
+      ? loadedBundle
+      : await this.db.getProductionBundle?.(productionId);
+    const editorData = bundle?.editorData || {};
+    const approved = bundle?.review_status === 'approved'
+      && Boolean(bundle.reviewed_at)
+      && editorData.factChecked === true
+      && editorData.rightsConfirmed === true;
+    if (!approved) {
+      const error = new Error('Publishing is blocked until a human approves this content (fact check and media rights confirmed)');
+      error.status = 409;
+      error.code = 'APPROVAL_REQUIRED';
+      throw error;
+    }
+  }
+
   async uploadToYouTube(scheduleEntry, options = {}) {
     const { metadata } = scheduleEntry;
     const validation = assertValidYouTubeMetadata(metadata.seo);
@@ -219,8 +240,12 @@ class PublishingSchedulingAgent {
       },
       status: {
         privacyStatus: futureSchedule ? 'private' : requestedPrivacy,
-        selfDeclaredMadeForKids: false,
+        selfDeclaredMadeForKids: typeof metadata.madeForKids === 'boolean'
+          ? metadata.madeForKids
+          : process.env.YOUTUBE_MADE_FOR_KIDS === 'true',
+        // Re-check at upload time so no earlier step can drop a required AI disclosure.
         containsSyntheticMedia: metadata.containsSyntheticMedia === true
+          || detectSyntheticMedia({ assets: { finalVideo: metadata.video, audio: metadata.audio } }).containsSyntheticMedia
       }
     };
     if (futureSchedule) videoMetadata.status.publishAt = scheduleEntry.publishTime;
@@ -438,7 +463,7 @@ class PublishingSchedulingAgent {
         await this.publishContent(entry.productionId);
         this.logger.info(`Auto-published: ${entry.title}`);
       } catch (error) {
-        if (error.code === 'READINESS_BLOCKED') {
+        if (error.code === 'READINESS_BLOCKED' || error.code === 'APPROVAL_REQUIRED') {
           this.logger.warn(error.message);
           continue;
         }

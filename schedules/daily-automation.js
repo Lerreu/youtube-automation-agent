@@ -130,49 +130,9 @@ class DailyAutomation {
         return;
       }
 
-      // Generate content strategy
-      const strategy = await this.agents.strategy.generateContentStrategy();
-      this.logger.info(`Generated strategy: ${strategy.topic}`);
-
-      // Generate script
-      const script = await this.agents.scriptWriter.generateScript(strategy);
-      this.logger.info(`Generated script: ${script.title}`);
-
-      // Generate thumbnail
-      const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
-      this.logger.info('Generated thumbnail');
-
-      // Optimize SEO
-      const seoData = await this.agents.seoOptimizer.optimize(script, strategy);
-      this.logger.info('Completed SEO optimization');
-
-      // Process through production
-      const productionData = await this.agents.production.processContent({
-        strategy,
-        script,
-        thumbnail,
-        seo: seoData
-      });
-      this.logger.info(`Production completed: ${productionData.id}`);
-
-      // Schedule for publishing (returns null when only placeholder assets were produced)
-      const scheduleEntry = await this.agents.publishing.scheduleContent(productionData);
-      if (scheduleEntry) {
-        this.logger.info('Content scheduled for publishing');
-      } else {
-        this.logger.warn('Content was NOT scheduled — production produced placeholder assets. See warnings above.');
-      }
-
-      timer.end();
-      this.logger.success('Daily content generation completed successfully');
-
-      // Log the event
-      await this.logAutomationEvent('daily_content_generation', 'success', {
-        contentId: productionData.id,
-        topic: strategy.topic,
-        scheduledFor: productionData.scheduledPublishTime
-      });
-
+      // The old inline pipeline scheduled content without human review. Generation
+      // must go through the injected job queue, which always stops at review.
+      throw new Error('Scheduler has no generateContent service; refusing to generate content outside the review pipeline');
     } catch (error) {
       this.logger.error('Daily content generation failed:', error);
       

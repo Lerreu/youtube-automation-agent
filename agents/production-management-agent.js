@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
 const { AIVideoGenerator } = require('../utils/ai-video-generator');
 const { SceneRepairService } = require('../utils/scene-repair-service');
+const { detectSyntheticMedia } = require('../utils/synthetic-media');
 
 class ProductionManagementAgent {
   constructor(db, credentials) {
@@ -618,10 +619,9 @@ class ProductionManagementAgent {
         format: 'mp4',
         provider: this.aiVideoGenerator.lastVideoResult || { actualProvider: 'slideshow', model: 'local-ffmpeg' }
       };
-      productionData.containsSyntheticMedia = Boolean(
-        this.aiVideoGenerator.lastVideoResult?.actualProvider &&
-        !['slideshow', 'simulation'].includes(this.aiVideoGenerator.lastVideoResult.actualProvider)
-      );
+      const synthetic = detectSyntheticMedia(productionData);
+      productionData.containsSyntheticMedia = synthetic.containsSyntheticMedia;
+      productionData.syntheticMediaReasons = synthetic.reasons;
       
       this.logger.info('AI video assembly complete');
       return finalVideoPath;

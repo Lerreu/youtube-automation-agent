@@ -15,6 +15,9 @@ class SystemTest {
   }
 
   async runAllTests() {
+    // Mutating API routes require API_KEY; give the in-process API tests one.
+    if (!process.env.API_KEY) process.env.API_KEY = 'test-suite-key';
+
     console.log(chalk.cyan.bold('\n🧪 YouTube Automation Agent - System Test'));
     console.log(chalk.gray('═'.repeat(60)));
     
@@ -42,6 +45,7 @@ class SystemTest {
       { name: 'Reported Discussion Fixes (#31, #73, #74)', test: () => this.testReportedDiscussionFixes() },
       { name: 'Resumable Generation Checkpoints', test: () => this.testResumableGenerationCheckpoints() },
       { name: 'API Validation and Security', test: () => this.testAPIValidationAndSecurity() },
+      { name: 'YouTube OAuth Hardening', test: () => this.testYouTubeOAuthHardening() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -329,7 +333,7 @@ class SystemTest {
       }
       const unavailableStart = await fetch(`http://127.0.0.1:${port}/api/operator/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY },
         body: '{}'
       });
       if (unavailableStart.status !== 503) {
@@ -347,7 +351,7 @@ class SystemTest {
       });
       const approveLearning = await fetch(
         `http://127.0.0.1:${port}/api/learning/recommendations/${learningRecommendation.id}/approve`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+        { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY }, body: '{}' }
       );
       const approvedLearning = await approveLearning.json();
       if (!approveLearning.ok || approvedLearning.result?.status !== 'approved') {
@@ -2397,6 +2401,55 @@ class SystemTest {
     this.logger.info('Resumable generation checkpoints test completed successfully');
   }
 
+  async testYouTubeOAuthHardening() {
+    const os = require('os');
+    const fsp = require('fs').promises;
+    const { google } = require('googleapis');
+    const { ModernAuth, parseCallback, escapeHtml } = require('./modern-auth');
+
+    const auth = new ModernAuth({ openBrowser: false });
+    const client = new google.auth.OAuth2('client-id', 'client-secret', 'http://127.0.0.1:8123/');
+    const request = await auth.buildAuthRequest(client);
+    const authUrl = new URL(request.authUrl);
+    if (authUrl.searchParams.get('state') !== request.state || request.state.length < 32) {
+      throw new Error('OAuth request is missing a strong state parameter');
+    }
+    if (authUrl.searchParams.get('code_challenge_method') !== 'S256' || !authUrl.searchParams.get('code_challenge') || !request.codeVerifier) {
+      throw new Error('OAuth request is missing PKCE');
+    }
+
+    const callback = query => new URL(`http://127.0.0.1:8123/?${query}`);
+    if (parseCallback(callback(`code=abc&state=${request.state}`), request.state).code !== 'abc') {
+      throw new Error('A valid OAuth callback was rejected');
+    }
+    for (const query of ['code=abc', 'code=abc&state=forged', `state=${request.state}`, `error=access_denied&state=forged`]) {
+      if (!parseCallback(callback(query), request.state).error) throw new Error(`OAuth callback accepted: ${query}`);
+    }
+    if (escapeHtml('<script>alert(1)</script>').includes('<script>')) {
+      throw new Error('OAuth error page does not escape HTML');
+    }
+
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'yaa-tokens-'));
+    try {
+      const manager = new CredentialManager();
+      manager.tokensPath = path.join(dir, 'tokens.json');
+      manager.credentials.youtube = { client_id: 'id', client_secret: 'secret', redirect_uris: ['http://127.0.0.1'] };
+      manager.tokens.youtube = { access_token: 'old', refresh_token: 'refresh-1' };
+      const ytAuth = manager.getYouTubeAuth();
+      if (manager.getYouTubeAuth() !== ytAuth) throw new Error('YouTube auth client is not reused');
+      ytAuth.emit('tokens', { access_token: 'new', expiry_date: 123 });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const saved = JSON.parse(await fsp.readFile(manager.tokensPath, 'utf8'));
+      if (saved.youtube.access_token !== 'new' || saved.youtube.refresh_token !== 'refresh-1') {
+        throw new Error('Refreshed YouTube tokens were not persisted with the original refresh token');
+      }
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+
+    this.logger.info('YouTube OAuth hardening test completed successfully');
+  }
+
   async testAPIValidationAndSecurity() {
     const { YouTubeAutomationAgent } = require('./index');
     const agent = new YouTubeAutomationAgent();
@@ -2452,8 +2505,32 @@ class SystemTest {
     }
 
     const previousKey = process.env.API_KEY;
-    process.env.API_KEY = 'test-secret';
+    delete process.env.API_KEY;
     const middleware = agent.requireAPIKey();
+
+    let unsetNextCalled = false;
+    const unsetResponse = this.createMockResponse();
+    middleware({ get: () => '' }, unsetResponse, () => { unsetNextCalled = true; });
+    if (unsetNextCalled || unsetResponse.statusCode !== 503) {
+      throw new Error('Mutating routes were open while API_KEY was unset');
+    }
+
+    const csrf = agent.rejectCrossSiteWrites();
+    const csrfCases = [
+      [{ method: 'POST', headers: { origin: 'https://evil.example', host: '127.0.0.1:3456' } }, false, 'foreign Origin'],
+      [{ method: 'POST', headers: { 'sec-fetch-site': 'cross-site', host: '127.0.0.1:3456' } }, false, 'cross-site fetch'],
+      [{ method: 'POST', headers: { origin: 'http://127.0.0.1:3456', host: '127.0.0.1:3456', 'sec-fetch-site': 'same-origin' } }, true, 'same-origin dashboard'],
+      [{ method: 'POST', headers: { host: '127.0.0.1:3456' } }, true, 'non-browser client'],
+      [{ method: 'GET', headers: { origin: 'https://evil.example', host: '127.0.0.1:3456' } }, true, 'cross-site read']
+    ];
+    for (const [request, allowed, label] of csrfCases) {
+      let passed = false;
+      const response = this.createMockResponse();
+      csrf({ method: request.method, protocol: 'http', get: name => request.headers[name.toLowerCase()] }, response, () => { passed = true; });
+      if (passed !== allowed) throw new Error(`Cross-site write check was wrong for ${label}`);
+    }
+
+    process.env.API_KEY = 'test-secret';
 
     let rejectedNextCalled = false;
     const rejectedResponse = this.createMockResponse();
@@ -2506,7 +2583,49 @@ class SystemTest {
       silenceReason: 'This test fixture is intentionally silent.',
       silenceConfirmedAt: new Date().toISOString()
     };
+    const approvedBundle = id => ({
+      id, review_status: 'approved', reviewed_at: new Date().toISOString(),
+      editorData: { factChecked: true, rightsConfirmed: true }
+    });
+    const approvedDb = { getProductionBundle: async id => approvedBundle(id) };
+
+    // Human approval gate: unapproved content must never reach the upload step.
+    for (const [label, bundle] of [
+      ['missing review', null],
+      ['pending review', { ...approvedBundle('prod-gate'), review_status: 'needs_review', reviewed_at: null }],
+      ['unchecked facts', { ...approvedBundle('prod-gate'), editorData: { factChecked: false, rightsConfirmed: true } }],
+      ['unconfirmed rights', { ...approvedBundle('prod-gate'), editorData: { factChecked: true, rightsConfirmed: false } }]
+    ]) {
+      const gated = new PublishingSchedulingAgent({
+        getProductionBundle: async () => bundle,
+        updateScheduleEntry: async () => {}
+      }, {});
+      gated.publishQueue = [{ productionId: 'prod-gate', title: 'Gate', status: 'scheduled', publishTime: new Date(Date.now() - 1000).toISOString(), metadata: { audio: intentionalAudio } }];
+      gated.uploadToYouTube = async () => { throw new Error(`Upload started for ${label}`); };
+      let gateCode = null;
+      try {
+        await gated.publishContent('prod-gate');
+      } catch (error) {
+        gateCode = error.code;
+      }
+      if (gateCode !== 'APPROVAL_REQUIRED') throw new Error(`Publishing was not blocked for ${label}`);
+      await gated.processPublishQueue();
+      if (gated.publishQueue[0].status !== 'scheduled') throw new Error(`Queue marked ${label} as failed instead of waiting for approval`);
+    }
+
+    // Shorts are gated on the approval of their source production.
+    const approvalLookups = [];
+    const shortGate = new PublishingSchedulingAgent({
+      getProductionBundle: async id => { approvalLookups.push(id); return id === 'prod-source' ? approvedBundle(id) : null; },
+      updateScheduleEntry: async () => {}
+    }, {});
+    shortGate.publishQueue = [{ productionId: 'short-1', title: 'Short', status: 'scheduled', metadata: { audio: intentionalAudio, sourceProductionId: 'prod-source' } }];
+    shortGate.uploadToYouTube = async () => ({ id: 'youtube-short' });
+    await shortGate.publishContent('short-1');
+    if (!approvalLookups.includes('prod-source')) throw new Error('Short publishing did not check source approval');
+
     const agent = new PublishingSchedulingAgent({
+      ...approvedDb,
       updateScheduleEntry: async () => {}
     }, {});
 
@@ -2522,7 +2641,7 @@ class SystemTest {
       throw new Error('publishContent removed the wrong publish queue entries');
     }
 
-    const missingNarration = new PublishingSchedulingAgent({ updateScheduleEntry: async () => {} }, {});
+    const missingNarration = new PublishingSchedulingAgent({ ...approvedDb, updateScheduleEntry: async () => {} }, {});
     missingNarration.publishQueue = [{ productionId: 'prod-no-audio', status: 'scheduled', metadata: {} }];
     missingNarration.uploadToYouTube = async () => { throw new Error('Upload must not start without narration'); };
     let narrationPublishBlocked = false;
@@ -2546,6 +2665,7 @@ class SystemTest {
 
     let uncertainUpdates = [];
     const uncertain = new PublishingSchedulingAgent({
+      ...approvedDb,
       updateScheduleEntry: async entry => uncertainUpdates.push({ ...entry })
     }, {});
     uncertain.publishQueue = [
@@ -2580,6 +2700,7 @@ class SystemTest {
       youtubeId: 'youtube-existing', metadata: { audio: intentionalAudio }
     };
     const reconcile = new PublishingSchedulingAgent({
+      ...approvedDb,
       getLatestScheduleEntry: async () => recorded,
       updateScheduleEntry: async () => {}
     }, {});
@@ -2631,6 +2752,52 @@ class SystemTest {
     }, { publishNow: true });
     if (uploadMetadata?.status?.privacyStatus !== 'public' || uploadMetadata?.status?.publishAt !== undefined) {
       throw new Error('Publish now still sent a stale scheduled publishAt value');
+    }
+
+    const { detectSyntheticMedia } = require('./utils/synthetic-media');
+    const syntheticCases = [
+      [{}, false, 'empty production'],
+      [{ assets: { finalVideo: { provider: { actualProvider: 'slideshow' } }, audio: { status: 'ready', provider: 'simulation' }, video: { visualAssets: ['a.info'] } } }, false, 'local slideshow with placeholders'],
+      [{ assets: { finalVideo: { provider: { actualProvider: 'kling' } } } }, true, 'AI video provider'],
+      [{ assets: { finalVideo: { provider: { actualProvider: 'slideshow' } }, audio: { status: 'ready', provider: 'elevenlabs' } } }, true, 'slideshow with AI voice'],
+      [{ assets: { audio: { status: 'unavailable', provider: 'openai' } } }, false, 'failed narration'],
+      [{ assets: { video: { visualAssets: ['visual_1.png'] } } }, true, 'slideshow with AI images']
+    ];
+    for (const [production, expected, label] of syntheticCases) {
+      if (detectSyntheticMedia(production).containsSyntheticMedia !== expected) {
+        throw new Error(`Synthetic media detection was wrong for ${label}`);
+      }
+    }
+
+    const previousKids = process.env.YOUTUBE_MADE_FOR_KIDS;
+    delete process.env.YOUTUBE_MADE_FOR_KIDS;
+    try {
+      await immediate.uploadToYouTube({
+        id: 'schedule-ai', publishTime: new Date().toISOString(),
+        metadata: {
+          seo: { title: 'AI voice', description: 'Narrated by AI.', tags: ['test'] },
+          video: { path: 'fixture.mp4', provider: { actualProvider: 'slideshow' } },
+          audio: { status: 'ready', provider: 'openai' },
+          containsSyntheticMedia: false
+        }
+      }, { publishNow: true });
+      if (uploadMetadata?.status?.containsSyntheticMedia !== true) {
+        throw new Error('Upload dropped the AI disclosure for AI narration');
+      }
+      if (uploadMetadata?.status?.selfDeclaredMadeForKids !== false) {
+        throw new Error('Made-for-kids should default to false');
+      }
+      process.env.YOUTUBE_MADE_FOR_KIDS = 'true';
+      await immediate.uploadToYouTube({
+        id: 'schedule-kids', publishTime: new Date().toISOString(),
+        metadata: { seo: { title: 'Kids', description: 'For kids.', tags: ['test'] }, video: { path: 'fixture.mp4' } }
+      }, { publishNow: true });
+      if (uploadMetadata?.status?.selfDeclaredMadeForKids !== true) {
+        throw new Error('YOUTUBE_MADE_FOR_KIDS was ignored');
+      }
+    } finally {
+      if (previousKids === undefined) delete process.env.YOUTUBE_MADE_FOR_KIDS;
+      else process.env.YOUTUBE_MADE_FOR_KIDS = previousKids;
     }
 
     this.logger.info('Publishing safety test completed successfully');
