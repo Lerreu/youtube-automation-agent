@@ -32,21 +32,8 @@ class SEOOptimizerAgent {
       this.logger.info(`Optimizing SEO for: ${script.title}`);
       
       const aiSEO = await this.generateSEOWithAI(script, strategy);
-      let title, description, tags;
-
-      if (aiSEO) {
-        ({ title, description, tags } = aiSEO);
-      } else {
-        this.logger.info('Using template SEO optimization');
-        // Generate optimized title
-        title = await this.optimizeTitle(script.title, strategy);
-        
-        // Generate description
-        description = await this.generateDescription(script, strategy);
-        
-        // Extract and optimize tags
-        tags = await this.generateTags(script, strategy);
-      }
+      const { title, tags } = aiSEO;
+      const description = this.appendDescriptionFooter(aiSEO.description);
       
       // Generate hashtags
       const hashtags = await this.generateHashtags(strategy);
@@ -91,15 +78,17 @@ class SEOOptimizerAgent {
 
   async generateSEOWithAI(script, strategy) {
     if (!this.aiTextService.isAvailable()) {
-      this.logger.info('Using template SEO optimization because no AI text provider is configured');
-      return null;
+      const error = new Error('SEO metadata needs an AI text provider. Configure one with npm run walkthrough.');
+      error.code = 'AI_TEXT_REQUIRED';
+      error.status = 503;
+      throw error;
     }
 
     const prompt = `You are optimizing YouTube metadata.
 Return only valid JSON with this exact shape:
 {
   "title": "SEO title under 100 characters",
-  "description": "YouTube description with useful summary and timestamps if relevant",
+  "description": "YouTube description summarizing what the video covers",
   "tags": ["tag"]
 }
 
@@ -109,7 +98,8 @@ Angle: ${strategy.angle}
 Content type: ${strategy.contentType}
 Target audience: ${strategy.targetAudience}
 Keywords: ${(strategy.keywords || []).join(', ')}
-Keep tags under YouTube's 500 character total guidance. Avoid fabricated statistics and unsupported claims.`;
+Keep tags under YouTube's 500 character total guidance. Avoid fabricated statistics and unsupported claims.
+Do not include timestamps, links, contact details, music or asset credits, placeholders in brackets, or claims about the creator; those are added separately from real data.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
@@ -130,9 +120,25 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
         tags
       };
     } catch (error) {
-      this.logger.warn(`AI SEO optimization failed; using template fallback: ${error.message}`);
-      return null;
+      const failure = new Error(`AI SEO optimization failed: ${error.message}`);
+      failure.code = 'AI_SEO_FAILED';
+      failure.cause = error;
+      throw failure;
     }
+  }
+
+  appendDescriptionFooter(description) {
+    // Only real values from .env; nothing is printed when a value is not configured.
+    const lines = [
+      ['Website', process.env.WEBSITE_URL],
+      ['Social', process.env.SOCIAL_LINKS],
+      ['Business inquiries', process.env.BUSINESS_EMAIL]
+    ]
+      .map(([label, value]) => [label, String(value || '').trim()])
+      .filter(([, value]) => value)
+      .map(([label, value]) => `${label}: ${value}`);
+    const footer = lines.length ? `\n\n${lines.join('\n')}` : '';
+    return `${String(description).trim()}${footer}`.slice(0, 5000);
   }
 
   parseAIJsonResponse(response) {
@@ -169,203 +175,6 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
 
     return uniqueTags;
   }
-  async optimizeTitle(originalTitle, strategy) {
-    // YouTube title limit: 100 characters, optimal: 60-70
-    let optimizedTitle = originalTitle;
-    
-    // Add power words if not present
-    const powerWords = ['Ultimate', 'Complete', 'Essential', 'Proven', 'Secret', 'Amazing', 'Powerful'];
-    const hasPowerWord = powerWords.some(word => 
-      originalTitle.toLowerCase().includes(word.toLowerCase())
-    );
-    
-    if (!hasPowerWord && originalTitle.length < 60) {
-      const randomPowerWord = powerWords[Math.floor(Math.random() * powerWords.length)];
-      optimizedTitle = `${randomPowerWord} ${originalTitle}`;
-    }
-    
-    // Add year if relevant and not present
-    const currentYear = new Date().getFullYear();
-    if (!optimizedTitle.includes(currentYear.toString()) && optimizedTitle.length < 70) {
-      optimizedTitle = `${optimizedTitle} (${currentYear})`;
-    }
-    
-    // Ensure primary keyword is in title
-    const primaryKeyword = strategy.keywords[0];
-    if (primaryKeyword && !optimizedTitle.toLowerCase().includes(primaryKeyword.toLowerCase())) {
-      optimizedTitle = `${optimizedTitle} - ${primaryKeyword}`;
-    }
-    
-    // Truncate if too long
-    if (optimizedTitle.length > 100) {
-      optimizedTitle = optimizedTitle.substring(0, 97) + '...';
-    }
-    
-    // Capitalize properly
-    optimizedTitle = this.titleCase(optimizedTitle);
-    
-    return optimizedTitle;
-  }
-
-  titleCase(str) {
-    const smallWords = ['a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'if', 'in', 'of', 'on', 'or', 'the', 'to', 'via', 'vs'];
-    
-    return str.split(' ').map((word, index) => {
-      if (index === 0 || !smallWords.includes(word.toLowerCase())) {
-        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-      }
-      return word.toLowerCase();
-    }).join(' ');
-  }
-
-  async generateDescription(script, strategy) {
-    // YouTube description limit: 5000 characters, first 125 shown in search
-    
-    let description = '';
-    
-    // First 125 characters - most important for SEO
-    const hook = `${script.title} - In this video, you'll discover ${strategy.angle.toLowerCase()}.`;
-    description += hook + '\n\n';
-    
-    // Video overview
-    description += '📺 WHAT YOU\'LL LEARN:\n';
-    if (script.mainContent && script.mainContent.sections) {
-      script.mainContent.sections.slice(0, 5).forEach(section => {
-        if (section.title) {
-          description += `• ${section.title}\n`;
-        }
-      });
-    }
-    description += '\n';
-    
-    // Timestamps/Chapters
-    description += '⏱️ TIMESTAMPS:\n';
-    description += '00:00 Introduction\n';
-    let timestamp = 20;
-    if (script.mainContent && script.mainContent.sections) {
-      script.mainContent.sections.forEach(section => {
-        const minutes = Math.floor(timestamp / 60);
-        const seconds = timestamp % 60;
-        description += `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')} ${section.title || 'Section'}\n`;
-        timestamp += section.duration || 60;
-      });
-    }
-    description += '\n';
-    
-    // Keywords paragraph (SEO optimized)
-    description += '📝 ABOUT THIS VIDEO:\n';
-    description += `This comprehensive guide on ${strategy.topic} covers everything you need to know. `;
-    description += `Whether you're a beginner or advanced, you'll find valuable insights about ${strategy.keywords.slice(0, 3).join(', ')}. `;
-    description += `Perfect for ${strategy.targetAudience}.\n\n`;
-    
-    // Links section
-    description += '🔗 USEFUL LINKS:\n';
-    description += `• Subscribe: [Your Channel URL]\n`;
-    description += `• Website: ${process.env.WEBSITE_URL || '[Your Website]'}\n`;
-    description += `• Social Media: ${process.env.SOCIAL_LINKS || '[Your Social Media]'}\n\n`;
-    
-    // Related videos
-    description += '📹 RELATED VIDEOS:\n';
-    description += '• [Related Video 1]\n';
-    description += '• [Related Video 2]\n';
-    description += '• [Related Video 3]\n\n';
-    
-    // Equipment/Tools (if applicable)
-    if (strategy.contentType === 'Tutorial') {
-      description += '🛠️ TOOLS & RESOURCES MENTIONED:\n';
-      description += '• [Tool/Resource 1]\n';
-      description += '• [Tool/Resource 2]\n\n';
-    }
-    
-    // Contact/Business
-    description += '📧 BUSINESS INQUIRIES:\n';
-    description += `${process.env.BUSINESS_EMAIL || '[Your Business Email]'}\n\n`;
-    
-    // Tags/Hashtags
-    description += '🏷️ TAGS:\n';
-    const hashtags = await this.generateHashtags(strategy);
-    description += hashtags.join(' ') + '\n\n';
-    
-    // Disclaimer if needed
-    description += '⚠️ DISCLAIMER:\n';
-    description += 'This video is for educational purposes only.\n\n';
-    
-    // Copyright
-    description += `© ${new Date().getFullYear()} All Rights Reserved\n`;
-    
-    // Music credits if applicable
-    description += '\n🎵 MUSIC:\n';
-    description += 'Background music from YouTube Audio Library\n';
-    
-    return description;
-  }
-
-  async generateTags(script, strategy) {
-    const tags = new Set();
-    
-    // Add primary keywords
-    strategy.keywords.forEach(keyword => tags.add(keyword));
-    
-    // Add topic variations
-    const topic = strategy.topic.toLowerCase();
-    tags.add(topic);
-    tags.add(topic.replace(/\s+/g, ''));
-    tags.add(topic.replace(/\s+/g, '_'));
-    
-    // Add content type tags
-    const contentTypeTags = {
-      'Tutorial': ['how to', 'tutorial', 'guide', 'step by step', 'learn'],
-      'Explainer': ['explained', 'what is', 'understanding', 'explanation'],
-      'Review': ['review', 'comparison', 'vs', 'best', 'top'],
-      'List': ['top 10', 'best', 'list', 'countdown'],
-      'Story': ['story', 'journey', 'experience', 'case study']
-    };
-    
-    const typeTags = contentTypeTags[strategy.contentType] || [];
-    typeTags.forEach(tag => tags.add(tag));
-    
-    // Add year tags
-    const year = new Date().getFullYear();
-    tags.add(year.toString());
-    tags.add(`${topic} ${year}`);
-    
-    // Add niche-specific tags
-    const niche = this.identifyNiche(strategy);
-    const nicheTags = this.getNicheTags(niche);
-    nicheTags.forEach(tag => tags.add(tag));
-    
-    // Add long-tail keywords
-    const longTailKeywords = this.generateLongTailKeywords(strategy);
-    longTailKeywords.forEach(keyword => tags.add(keyword));
-    
-    // Extract tags from script content
-    if (script.keywords) {
-      script.keywords.forEach(keyword => tags.add(keyword));
-    }
-    
-    // Add channel branding tags
-    if (process.env.CHANNEL_NAME) {
-      tags.add(process.env.CHANNEL_NAME);
-    }
-    
-    // YouTube allows max 500 characters in tags, prioritize most important
-    const tagArray = Array.from(tags);
-    const prioritizedTags = this.prioritizeTags(tagArray, strategy);
-    
-    // Ensure total character count doesn't exceed 500
-    let totalLength = 0;
-    const finalTags = [];
-    
-    for (const tag of prioritizedTags) {
-      if (totalLength + tag.length + 1 <= 500) {
-        finalTags.push(tag);
-        totalLength += tag.length + 1; // +1 for comma separator
-      }
-    }
-    
-    return finalTags;
-  }
-
   identifyNiche(strategy) {
     const topic = strategy.topic.toLowerCase();
     
@@ -386,67 +195,6 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     }
     
     return 'general';
-  }
-
-  getNicheTags(niche) {
-    const nicheTags = {
-      'technology': ['tech', 'technology', 'innovation', 'future tech', 'tech news'],
-      'gaming': ['gaming', 'gameplay', 'walkthrough', 'lets play', 'game review'],
-      'education': ['educational', 'learning', 'study tips', 'online learning', 'edtech'],
-      'business': ['business tips', 'entrepreneurship', 'startup', 'business strategy', 'success'],
-      'lifestyle': ['lifestyle', 'life hacks', 'daily routine', 'productivity', 'self improvement'],
-      'health': ['health tips', 'fitness', 'healthy living', 'wellness', 'nutrition'],
-      'entertainment': ['entertainment', 'fun', 'viral', 'trending', 'must watch'],
-      'general': ['video', 'youtube', 'content', 'new', 'latest']
-    };
-    
-    return nicheTags[niche] || nicheTags.general;
-  }
-
-  generateLongTailKeywords(strategy) {
-    const longTailTemplates = [
-      `how to ${strategy.topic}`,
-      `${strategy.topic} for beginners`,
-      `${strategy.topic} tutorial`,
-      `best ${strategy.topic}`,
-      `${strategy.topic} tips and tricks`,
-      `${strategy.topic} step by step`,
-      `${strategy.topic} guide ${new Date().getFullYear()}`,
-      `${strategy.topic} explained simply`,
-      `everything about ${strategy.topic}`,
-      `${strategy.topic} mistakes to avoid`
-    ];
-    
-    return longTailTemplates.slice(0, 5);
-  }
-
-  prioritizeTags(tags, strategy) {
-    // Score and sort tags by importance
-    const scoredTags = tags.map(tag => {
-      let score = 0;
-      
-      // Primary keyword gets highest score
-      if (tag === strategy.keywords[0]) score += 10;
-      
-      // Other strategy keywords
-      if (strategy.keywords.includes(tag)) score += 5;
-      
-      // Contains topic
-      if (tag.includes(strategy.topic.toLowerCase())) score += 3;
-      
-      // Long-tail keywords
-      if (tag.split(' ').length > 2) score += 2;
-      
-      // Current year
-      if (tag.includes(new Date().getFullYear().toString())) score += 1;
-      
-      return { tag, score };
-    });
-    
-    // Sort by score descending
-    scoredTags.sort((a, b) => b.score - a.score);
-    
-    return scoredTags.map(item => item.tag);
   }
 
   async generateHashtags(strategy) {
@@ -581,7 +329,7 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     if (description.includes('TIMESTAMPS')) score += 5;
     if (description.includes('http')) score += 5; // Contains links
     if (description.split('\n').length > 10) score += 5; // Well formatted
-    if (description.substring(0, 125).includes(tags[0])) score += 5; // Primary keyword in first 125 chars
+    if (tags[0] && description.substring(0, 125).includes(tags[0])) score += 5; // Primary keyword in first 125 chars
     
     // Tags scoring (30 points max)
     if (tags.length >= 10) score += 10;

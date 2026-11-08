@@ -92,10 +92,8 @@ class AnalyticsOptimizationAgent {
       const context = await this.db.getPublishedContentContext(videoId);
 
       // Fetch the granular retention curve separately so its absence never
-      // converts otherwise-real channel analytics into simulated data.
-      const retention = analytics.simulated
-        ? { available: false, simulated: true, reason: 'base_analytics_unavailable', points: [] }
-        : await this.getAudienceRetention(videoId, period, videoDetails.duration);
+      // discards otherwise-real channel analytics.
+      const retention = await this.getAudienceRetention(videoId, period, videoDetails.duration);
       
       // Analyze thumbnail performance
       const thumbnailMetrics = await this.analyzeThumbnailPerformance(videoId, period);
@@ -214,8 +212,13 @@ class AnalyticsOptimizationAgent {
         engagement: await this.calculateEngagementMetrics(videoId)
       };
     } catch (error) {
+      // Never substitute invented numbers: callers must see that data is missing.
       this.logger.error(`Failed to get analytics for ${videoId}:`, error);
-      return this.getSimulatedAnalytics(videoId);
+      const unavailable = new Error(`YouTube Analytics is unavailable for ${videoId}: ${error.message}`);
+      unavailable.code = 'ANALYTICS_UNAVAILABLE';
+      unavailable.status = 503;
+      unavailable.cause = error;
+      throw unavailable;
     }
   }
 
@@ -283,7 +286,8 @@ class AnalyticsOptimizationAgent {
         primaryAudience: this.identifyPrimaryAudience(ageResponse.data.rows, genderResponse.data.rows)
       };
     } catch (error) {
-      return this.getSimulatedDemographics();
+      this.logger.warn(`Demographics unavailable for ${videoId}: ${error.message}`);
+      return { available: false, reason: error.message, ageGroups: [], gender: [], primaryAudience: null };
     }
   }
 
@@ -726,34 +730,13 @@ class AnalyticsOptimizationAgent {
     return recommendations;
   }
 
-  // Simulation methods for when API is not available
-  getSimulatedAnalytics(_videoId) {
-    return {
-      simulated: true,
-      views: { totalViews: Math.floor(Math.random() * 50000), averageCTR: Math.random() * 10 },
-      watchTime: { averageViewPercentage: Math.random() * 100 },
-      engagement: { engagementRate: Math.random() * 10 },
-      trafficSources: { sources: [{ source: 'SEARCH', percentage: '30' }] },
-      outcomes: {
-        subscribersAvailable: false, subscribersGained: null, subscribersLost: null,
-        netSubscribers: null, revenueAvailable: false, estimatedRevenue: null,
-        monetizedPlaybacks: null, playbackBasedCpm: null
-      }
-    };
-  }
-
-  getSimulatedDemographics() {
-    return {
-      ageGroups: [['18-24', 30], ['25-34', 40], ['35-44', 20]],
-      gender: [['male', 60], ['female', 40]],
-      primaryAudience: 'Males 25-34'
-    };
-  }
-
   identifyPrimaryAudience(ageGroups, gender) {
-    const topAge = ageGroups?.[0]?.[0] || '25-34';
-    const topGender = gender?.[0]?.[0] || 'male';
-    return `${topGender}s ${topAge}`;
+    // Pick the largest real segment; with no data there is no primary audience.
+    const largest = rows => [...(rows || [])].sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0] || null;
+    const topAge = largest(ageGroups);
+    const topGender = largest(gender);
+    if (!topAge && !topGender) return null;
+    return [topGender, topAge].filter(Boolean).join(' ');
   }
 
   calculateOrganicPercentage(sources) {

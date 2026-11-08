@@ -307,9 +307,6 @@ class DailyAutomation {
         this.logger.info(`Top performing topics: ${bestPerformingTopics.join(', ')}`);
       }
 
-      // Optimize publishing times
-      await this.agents.publishing.optimizePublishTimes();
-      
       // Generate strategy insights
       const insights = await this.generateWeeklyInsights(weeklyAnalytics);
       

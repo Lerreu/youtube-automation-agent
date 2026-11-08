@@ -165,10 +165,10 @@ class ProductionManagementAgent {
     
     // Add introduction
     if (script.introduction) {
-      ttsText += `${script.introduction.greeting}\n`;
-      ttsText += `${script.introduction.topicIntro}\n`;
-      ttsText += `${script.introduction.valueProposition}\n`;
-      ttsText += `${script.introduction.credibility}\n\n`;
+      for (const line of [script.introduction.greeting, script.introduction.topicIntro, script.introduction.valueProposition, script.introduction.credibility]) {
+        if (line) ttsText += `${line}\n`;
+      }
+      ttsText += '\n';
     }
     
     // Add main content
@@ -276,30 +276,27 @@ class ProductionManagementAgent {
       return strategy.bestPublishTime;
     }
     
-    // Default: next optimal publishing window
+    // Placeholder slot (tomorrow at DEFAULT_PUBLISH_HOUR, 14 by default); the
+    // operator confirms or changes it at approval.
+    const hour = Number.parseInt(process.env.DEFAULT_PUBLISH_HOUR, 10);
     const now = new Date();
     const tomorrow = new Date(now);
     tomorrow.setDate(now.getDate() + 1);
-    tomorrow.setHours(14, 0, 0, 0); // 2 PM default
+    tomorrow.setHours(Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 14, 0, 0, 0);
     
     return tomorrow.toISOString();
   }
 
   calculatePriority(strategy) {
     let priority = 50; // Base priority
-    
-    // Adjust based on estimated views
-    if (strategy.estimatedViews > 100000) priority += 30;
-    else if (strategy.estimatedViews > 50000) priority += 20;
-    else if (strategy.estimatedViews > 10000) priority += 10;
-    
+
     // Adjust based on trend score
     if (strategy.competitorAnalysis && strategy.competitorAnalysis.length > 0) {
       priority += 10;
     }
     
     // Time sensitivity
-    const hoursUntilPublish = (new Date(strategy.bestPublishTime) - new Date()) / (1000 * 60 * 60);
+    const hoursUntilPublish = (new Date(this.calculatePublishTime(strategy)) - new Date()) / (1000 * 60 * 60);
     if (hoursUntilPublish < 24) priority += 20;
     else if (hoursUntilPublish < 48) priority += 10;
     
