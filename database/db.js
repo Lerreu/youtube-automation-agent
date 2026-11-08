@@ -2,6 +2,7 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
+const { runMigrations } = require('./migrations');
 
 class Database {
   constructor() {
@@ -37,6 +38,12 @@ class Database {
   }
 
   async createTables() {
+    await runMigrations(this);
+    await this.insertDefaultSettings();
+  }
+
+  // Migration 1 (see database/migrations.js). Do not change: add a new migration instead.
+  async createBaselineSchema() {
     const tables = [
       // Content Strategy
       `CREATE TABLE IF NOT EXISTS content_strategies (
@@ -652,9 +659,6 @@ class Database {
     await this.ensureColumns('discoverability_audits', {
       error_code: 'TEXT'
     });
-
-    // Insert default settings
-    await this.insertDefaultSettings();
   }
 
   async ensureColumns(tableName, columns) {
@@ -674,7 +678,6 @@ class Database {
       ['auto_publish_enabled', 'true', 'Enable automatic publishing'],
       ['analytics_enabled', 'true', 'Enable analytics collection'],
       ['optimization_enabled', 'true', 'Enable automatic optimization'],
-      ['publish_time_optimization', 'true', 'Optimize publishing times automatically'],
       ['thumbnail_ab_testing', 'false', 'Enable thumbnail A/B testing'],
       ['content_backup_enabled', 'true', 'Enable content backup'],
       ['notification_enabled', 'true', 'Enable system notifications'],

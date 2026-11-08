@@ -57,6 +57,7 @@ class SystemTest {
       { name: 'Strategy Honesty', test: () => this.testEvergreenTopics() },
       { name: 'Content Honesty', test: () => this.testContentHonesty() },
       { name: 'Reliability', test: () => this.testReliability() },
+      { name: 'Schema Migrations', test: () => this.testSchemaMigrations() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
       { name: 'Directory Structure', test: () => this.testDirectories() },
@@ -3623,6 +3624,70 @@ class SystemTest {
     if (estimated.timing !== 'estimated') throw new Error('Captions without audio were not marked as estimated');
 
     this.logger.info('Reliability test completed successfully');
+  }
+
+  async testSchemaMigrations() {
+    const os = require('os');
+    const fsp = require('fs').promises;
+    const { MIGRATIONS, runMigrations } = require('./database/migrations');
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'yaa-migrations-'));
+    const open = async () => {
+      const db = new Database();
+      db.dbPath = path.join(dir, 'test.db');
+      db.logger = { info: () => {}, warn: () => {}, error: () => {}, success: () => {} };
+      await db.initialize();
+      return db;
+    };
+    try {
+      // Fresh database: every migration is applied once.
+      let db = await open();
+      const versions = (await db.getAllRows('SELECT version FROM schema_migrations ORDER BY version')).map(row => row.version);
+      if (versions.join(',') !== MIGRATIONS.map(m => m.version).join(',')) throw new Error(`Unexpected applied migrations: ${versions}`);
+
+      // A database from before versioned migrations (no schema_migrations, legacy setting) is upgraded.
+      await db.executeQuery('DROP TABLE schema_migrations');
+      await db.setSetting('approval_required', 'false');
+      await db.close();
+      db = await open();
+      if (await db.getSetting('approval_required') !== null) throw new Error('Legacy approval_required setting survived the upgrade');
+      if ((await db.getAllRows('SELECT version FROM schema_migrations')).length !== MIGRATIONS.length) throw new Error('Legacy database was not marked as migrated');
+
+      // Re-opening does not re-run anything.
+      const rerun = await runMigrations(db);
+      if (rerun.applied.length !== 0) throw new Error('Applied migrations ran again');
+
+      // A failing migration rolls back completely.
+      const failing = [...MIGRATIONS, {
+        version: MIGRATIONS.length + 1,
+        name: 'broken',
+        up: async target => {
+          await target.executeQuery('CREATE TABLE half_done (id TEXT)');
+          throw new Error('boom');
+        }
+      }];
+      let failed = false;
+      try {
+        await runMigrations(db, failing);
+      } catch (error) {
+        failed = /Migration \d+ \(broken\) failed: boom/.test(error.message);
+      }
+      const leftover = await db.getRow("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'half_done'");
+      if (!failed || leftover) throw new Error('A failed migration was not rolled back');
+
+      // Code older than the database refuses to run against it.
+      await db.executeQuery('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [999, 'from_the_future']);
+      let refused = false;
+      try {
+        await runMigrations(db);
+      } catch (error) {
+        refused = /newer than this code supports/.test(error.message);
+      }
+      if (!refused) throw new Error('Older code ran against a newer schema');
+      await db.close();
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+    this.logger.info('Schema migrations test completed successfully');
   }
 
   async testWalkthroughModule() {
