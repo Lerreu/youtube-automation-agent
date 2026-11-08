@@ -162,7 +162,7 @@ class DailyAutomation {
     if (channelStrategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
         `SELECT COUNT(*) AS count FROM generation_jobs
-         WHERE source = 'autonomous_operator' AND status = 'completed'
+         WHERE source IN ('autonomous_operator', 'scheduler') AND status = 'completed'
          AND created_at >= datetime('now', '-7 days')`
       );
       if (Number(weeklyOutput?.count || 0) >= channelStrategy.cadence_per_week) return false;
@@ -415,18 +415,22 @@ class DailyAutomation {
 
   async optimizeExistingContent() {
     // Get videos published in last 30 days with low performance
+    // analytics_reports.video_id holds the YouTube video ID, so join on youtube_id.
     const lowPerformingVideos = await this.db.getAllRows(
-      `SELECT ar.* FROM analytics_reports ar
-       JOIN publish_schedule ps ON ar.video_id = ps.id
-       WHERE ar.performance_score < 50 
+      `SELECT DISTINCT ar.video_id FROM analytics_reports ar
+       JOIN publish_schedule ps ON ar.video_id = ps.youtube_id
+       WHERE ar.performance_score < 50
        AND ps.published_at > datetime('now', '-30 days')
        LIMIT 5`
     );
-    
+
     for (const video of lowPerformingVideos) {
-      // Re-analyze and generate optimization suggestions
-      await this.agents.analytics.analyzeVideoPerformance(video.video_id);
-      this.logger.info(`Re-analyzed low performing video: ${video.video_id}`);
+      try {
+        await this.agents.analytics.analyzeVideoPerformance(video.video_id);
+        this.logger.info(`Re-analyzed low performing video: ${video.video_id}`);
+      } catch (error) {
+        this.logger.warn(`Could not re-analyze ${video.video_id}: ${error.message}`);
+      }
     }
   }
 

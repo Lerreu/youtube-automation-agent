@@ -1,4 +1,3 @@
-const { google } = require('googleapis');
 const { Logger } = require('../utils/logger');
 const { ChannelLearningEngine } = require('../utils/channel-learning-engine');
 
@@ -43,9 +42,8 @@ class AnalyticsOptimizationAgent {
 
   async setupAnalyticsAPI() {
     try {
-      const auth = this.credentials.getYouTubeAuth();
-      this.youtubeAnalytics = google.youtubeAnalytics({ version: 'v2', auth });
-      this.youtube = google.youtube({ version: 'v3', auth });
+      this.youtubeAnalytics = this.credentials.getYouTubeAnalyticsClient();
+      this.youtube = this.credentials.getYouTubeClient();
       this.logger.info('YouTube Analytics API initialized');
     } catch (error) {
       this.logger.error('Failed to initialize Analytics API:', error);

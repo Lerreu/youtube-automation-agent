@@ -5,6 +5,7 @@ const inquirer = require('inquirer');
 const chalk = require('chalk');
 const { Logger } = require('./logger');
 const { PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL } = require('./ai-text-service');
+const { guardYouTubeClient } = require('./youtube-api-guard');
 
 // API keys and OAuth tokens are owner-only (0600). writeFile's mode applies only
 // when the file is created, so files written by older versions are tightened too.
@@ -139,9 +140,25 @@ class CredentialManager {
     }
   }
 
+  // Data API client with quota accounting and safe retries.
   getYouTubeClient() {
     const auth = this.getYouTubeAuth();
-    return google.youtube({ version: 'v3', auth });
+    if (this.youtubeClient?.auth !== auth) {
+      this.youtubeClient = { auth, client: guardYouTubeClient(google.youtube({ version: 'v3', auth })) };
+    }
+    return this.youtubeClient.client;
+  }
+
+  // Analytics API has its own quota; only retries apply.
+  getYouTubeAnalyticsClient() {
+    const auth = this.getYouTubeAuth();
+    if (this.youtubeAnalyticsClient?.auth !== auth) {
+      this.youtubeAnalyticsClient = {
+        auth,
+        client: guardYouTubeClient(google.youtubeAnalytics({ version: 'v2', auth }), { countQuota: false })
+      };
+    }
+    return this.youtubeAnalyticsClient.client;
   }
 
   hasYouTubeScope(scope) {
@@ -396,49 +413,6 @@ class CredentialManager {
     console.log(chalk.green('MiniMax credentials configured successfully!'));
   }
 
-  // Azure Speech Services (TTS)
-  async setupAzureSpeechCredentials() {
-    console.log(chalk.cyan('\n🎙️  Azure Speech Services Setup'));
-    console.log(chalk.gray('Create a Speech service in Azure Portal'));
-    
-    const answers = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'subscriptionKey',
-        message: 'Enter your Azure Speech subscription key:',
-        validate: input => input.length > 0 || 'Subscription key is required'
-      },
-      {
-        type: 'input',
-        name: 'region',
-        message: 'Enter your Azure region:',
-        default: 'eastus'
-      },
-      {
-        type: 'list',
-        name: 'voice',
-        message: 'Select preferred voice:',
-        choices: [
-          'en-US-JennyNeural',
-          'en-US-GuyNeural',
-          'en-US-AriaNeural',
-          'en-US-DavisNeural',
-          'en-US-AmberNeural'
-        ],
-        default: 'en-US-JennyNeural'
-      }
-    ]);
-
-    this.credentials.azureSpeech = {
-      subscriptionKey: answers.subscriptionKey,
-      region: answers.region,
-      voice: answers.voice
-    };
-
-    await this.saveCredentials();
-    console.log(chalk.green('✅ Azure Speech credentials configured successfully!'));
-  }
-
   // Channel Configuration
   async setupChannelConfig() {
     console.log(chalk.cyan('\n📺 Channel Configuration'));
@@ -616,8 +590,7 @@ class CredentialManager {
     
     const results = {
       youtube: false,
-      openai: false,
-      azureSpeech: false
+      openai: false
     };
 
     // Test YouTube API
@@ -717,7 +690,6 @@ class CredentialManager {
         choices: [
           { name: 'OpenAI TTS (gpt-4o-mini-tts, uses your OpenAI key)', value: 'openai-tts' },
           { name: 'ElevenLabs (highest quality)', value: 'elevenlabs' },
-          { name: 'Azure Speech Services', value: 'azure' },
           { name: 'Skip TTS Setup', value: 'skip' }
         ]
       }
@@ -727,8 +699,6 @@ class CredentialManager {
       console.log(chalk.green('✅ OpenAI TTS will use your existing OpenAI API key'));
     } else if (service === 'elevenlabs') {
       await this.setupElevenLabsCredentials();
-    } else if (service === 'azure') {
-      await this.setupAzureSpeechCredentials();
     }
   }
 

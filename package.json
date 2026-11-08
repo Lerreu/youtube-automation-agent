@@ -32,7 +32,6 @@
     "form-data": "^4.0.4",
     "googleapis": "^173.0.0",
     "inquirer": "^8.2.6",
-    "microsoft-cognitiveservices-speech-sdk": "^1.45.0",
     "moment": "^2.29.4",
     "node-cron": "^3.0.2",
     "openai": "^6.0.0",

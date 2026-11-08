@@ -6,25 +6,12 @@ class SEOOptimizerAgent {
     this.db = db;
     this.credentials = credentials;
     this.logger = new Logger('SEOOptimizer');
-    this.keywordDatabase = new Map();
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
   }
 
   async initialize() {
     this.logger.info('Initializing SEO Optimizer Agent...');
-    await this.loadKeywordDatabase();
     return true;
-  }
-
-  async loadKeywordDatabase() {
-    try {
-      const keywords = await this.db.getKeywordHistory();
-      keywords.forEach(kw => {
-        this.keywordDatabase.set(kw.keyword, kw.performance);
-      });
-    } catch (error) {
-      this.logger.warn('No keyword history found');
-    }
   }
 
   async optimize(script, strategy) {
@@ -53,6 +40,8 @@ class SEOOptimizerAgent {
         tags,
         hashtags,
         chapters,
+        // Chapter times come from script section estimates, not the final edit; they are not published.
+        chaptersTiming: 'estimated_from_script',
         endScreen,
         seoScore,
         metadata: {

@@ -56,6 +56,7 @@ class SystemTest {
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Strategy Honesty', test: () => this.testEvergreenTopics() },
       { name: 'Content Honesty', test: () => this.testContentHonesty() },
+      { name: 'Reliability', test: () => this.testReliability() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
       { name: 'Directory Structure', test: () => this.testDirectories() },
@@ -3473,6 +3474,155 @@ class SystemTest {
     }
 
     this.logger.info('Content honesty test completed successfully');
+  }
+
+  async testReliability() {
+    const { guardYouTubeClient, QuotaTracker, quotaCost } = require('./utils/youtube-api-guard');
+    const { AITextService } = require('./utils/ai-text-service');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
+    const noSleep = async () => {};
+    const quietLogger = { warn: () => {}, info: () => {}, error: () => {} };
+    const apiError = (code, reason) => Object.assign(new Error(reason || `HTTP ${code}`), { code, errors: reason ? [{ reason }] : undefined });
+
+    // Quota: costs are counted per request and calls stop before the limit.
+    if (quotaCost('videos.insert') !== 1600 || quotaCost('videos.list') !== 1 || quotaCost('search.list') !== 100) {
+      throw new Error('Unexpected YouTube quota costs');
+    }
+    const tracker = new QuotaTracker({ dailyLimit: 1700 });
+    let inserts = 0;
+    const client = guardYouTubeClient({
+      videos: { insert: async () => { inserts++; return { data: { id: 'v1' } }; }, list: async () => ({ data: { items: [] } }) }
+    }, { tracker, sleep: noSleep, logger: quietLogger });
+    await client.videos.insert({});
+    await client.videos.list({});
+    let quotaCode = null;
+    try {
+      await client.videos.insert({});
+    } catch (error) {
+      quotaCode = error.code;
+    }
+    if (quotaCode !== 'YOUTUBE_QUOTA_EXHAUSTED' || inserts !== 1 || tracker.snapshot().used !== 1601) {
+      throw new Error('Quota guard did not stop an upload that would exceed the daily limit');
+    }
+
+    // The guard must work on real googleapis clients, whose resources are read-only properties.
+    const { google } = require('googleapis');
+    const realGuarded = guardYouTubeClient(google.youtube({ version: 'v3', auth: 'fake-key' }), { tracker: new QuotaTracker({ dailyLimit: 10 }) });
+    if (typeof realGuarded.videos.list !== 'function' || typeof realGuarded.thumbnails.set !== 'function') {
+      throw new Error('Guard cannot wrap a real googleapis client');
+    }
+
+    // Day rollover resets usage (quota resets at midnight Pacific).
+    let now = new Date('2026-01-10T12:00:00Z');
+    const rolling = new QuotaTracker({ dailyLimit: 100, now: () => now });
+    rolling.reserve('videos.list');
+    now = new Date('2026-01-11T12:00:00Z');
+    if (rolling.snapshot().used !== 0) throw new Error('Quota usage did not reset on a new Pacific day');
+
+    // Retries: transient read errors are retried; uploads are not retried after an unknown outcome.
+    let listCalls = 0;
+    const flaky = guardYouTubeClient({
+      videos: {
+        list: async () => { listCalls++; if (listCalls < 3) throw apiError(503, 'backendError'); return { data: { items: [1] } }; },
+        insert: async () => { throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }); }
+      },
+      commentThreads: { insert: async () => { throw apiError(429, 'rateLimitExceeded'); } }
+    }, { tracker: new QuotaTracker({ dailyLimit: 100000 }), sleep: noSleep, logger: quietLogger, maxRetries: 3 });
+    const listed = await flaky.videos.list({});
+    if (listCalls !== 3 || listed.data.items.length !== 1) throw new Error('Transient read errors were not retried');
+    let insertAttempts = 0;
+    const insertClient = guardYouTubeClient({
+      videos: { insert: async () => { insertAttempts++; throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }); } }
+    }, { tracker: new QuotaTracker({ dailyLimit: 100000 }), sleep: noSleep, logger: quietLogger });
+    await insertClient.videos.insert({}).catch(() => {});
+    if (insertAttempts !== 1) throw new Error('An upload with an unknown outcome was retried');
+    let rateLimited = 0;
+    const rateClient = guardYouTubeClient({
+      commentThreads: { insert: async () => { rateLimited++; throw apiError(429, 'rateLimitExceeded'); } }
+    }, { tracker: new QuotaTracker({ dailyLimit: 100000 }), sleep: noSleep, logger: quietLogger, maxRetries: 2 });
+    await rateClient.commentThreads.insert({}).catch(() => {});
+    if (rateLimited !== 3) throw new Error('A rate-limited write was not retried');
+
+    // YouTube's own quotaExceeded is final for the day.
+    const exhausted = new QuotaTracker({ dailyLimit: 10000 });
+    let quotaCalls = 0;
+    const quotaClient = guardYouTubeClient({
+      search: { list: async () => { quotaCalls++; throw apiError(403, 'quotaExceeded'); } }
+    }, { tracker: exhausted, sleep: noSleep, logger: quietLogger });
+    let exhaustedCode = null;
+    try {
+      await quotaClient.search.list({});
+    } catch (error) {
+      exhaustedCode = error.code;
+    }
+    if (exhaustedCode !== 'YOUTUBE_QUOTA_EXHAUSTED' || quotaCalls !== 1 || exhausted.remaining() !== 0) {
+      throw new Error('quotaExceeded from YouTube was retried or not recorded');
+    }
+
+    // Publishing: a quota stop keeps the entry scheduled for the next day.
+    const updates = [];
+    const publisher = new PublishingSchedulingAgent({
+      getProductionBundle: async id => ({ id, review_status: 'approved', reviewed_at: new Date().toISOString(), editorData: { factChecked: true, rightsConfirmed: true } }),
+      updateScheduleEntry: async entry => updates.push({ ...entry })
+    }, {});
+    publisher.publishQueue = [{
+      productionId: 'prod-quota', title: 'Quota', status: 'scheduled', publishTime: new Date(Date.now() - 1000).toISOString(),
+      metadata: { audio: { intentionalSilence: true, silenceReason: 'This test fixture is intentionally silent.', silenceConfirmedAt: new Date().toISOString() } }
+    }];
+    publisher.uploadToYouTube = async entry => {
+      entry.uploadAttempted = true;
+      throw Object.assign(new Error('quota'), { code: 'YOUTUBE_QUOTA_EXHAUSTED', status: 429 });
+    };
+    await publisher.processPublishQueue();
+    if (publisher.publishQueue[0].status !== 'scheduled' || updates.at(-1)?.status !== 'scheduled') {
+      throw new Error('A quota stop did not leave the upload scheduled');
+    }
+
+    // AI text: the next configured provider answers when the primary fails.
+    const service = Object.create(AITextService.prototype);
+    Object.assign(service, {
+      logger: quietLogger,
+      providerName: 'Primary',
+      model: 'primary-model',
+      gemini: null,
+      client: { chat: { completions: { create: async () => { throw Object.assign(new Error('invalid key'), { status: 401 }); } } } },
+      fallbacks: [{ name: 'Backup', model: 'backup-model', gemini: null, client: { chat: { completions: { create: async request => ({ choices: [{ message: { content: `ok from ${request.model}` } }] }) } } } }]
+    });
+    const answer = await service.generateText('hi');
+    if (answer !== 'ok from backup-model' || service.lastProviderName !== 'Backup') throw new Error('AI text fallback did not use the backup provider');
+    service.fallbacks[0].client.chat.completions.create = async () => { throw new Error('also down'); };
+    let allFailed = null;
+    try {
+      await service.generateText('hi');
+    } catch (error) {
+      allFailed = error;
+    }
+    if (allFailed?.code !== 'AI_TEXT_PROVIDERS_FAILED' || !/Primary: invalid key/.test(allFailed.message) || !/Backup: also down/.test(allFailed.message)) {
+      throw new Error('AI text fallback did not report every provider failure');
+    }
+
+    // Captions: narrated text, spread over the measured audio length.
+    const production = new ProductionManagementAgent({}, {});
+    production.aiVideoGenerator.getMediaDuration = async () => 12;
+    const script = {
+      hook: { text: 'Sour espresso means under extraction.' },
+      introduction: { greeting: '', topicIntro: 'Here is the fix.', valueProposition: '', credibility: '' },
+      mainContent: { sections: [{ title: 'Grind', content: ['Grind finer one step at a time.'] }] },
+      conclusion: { recap: ['Change one thing.'], finalThought: 'Taste each shot.' }
+    };
+    const measured = await production.createSRTCaptions({ script, assets: { audio: { status: 'ready', path: 'narration.mp3' } } });
+    const narrated = production.formatScriptForTTS(script).split(/\s+/).filter(Boolean).join(' ');
+    const captioned = measured.srt.split('\n\n').filter(Boolean).map(block => block.split('\n').slice(2).join(' ')).join(' ');
+    if (measured.timing !== 'audio_proportional' || captioned !== narrated) {
+      throw new Error('Captions do not match the narrated text');
+    }
+    const lastTime = measured.srt.trim().split('\n\n').at(-1).split('\n')[1].split(' --> ')[1];
+    if (lastTime !== '00:00:12,000') throw new Error(`Captions do not end with the narration (ended at ${lastTime})`);
+    const estimated = await production.createSRTCaptions({ script, assets: { audio: { status: 'unavailable' } } });
+    if (estimated.timing !== 'estimated') throw new Error('Captions without audio were not marked as estimated');
+
+    this.logger.info('Reliability test completed successfully');
   }
 
   async testWalkthroughModule() {

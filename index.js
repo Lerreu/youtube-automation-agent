@@ -19,6 +19,7 @@ const { OperatorService } = require('./utils/operator-service');
 const { AutonomousChannelOperator } = require('./utils/autonomous-channel-operator');
 const { ActivationMetrics } = require('./utils/activation-metrics');
 const { detectSyntheticMedia } = require('./utils/synthetic-media');
+const { sharedTracker } = require('./utils/youtube-api-guard');
 const { AnonymousTelemetry } = require('./utils/anonymous-telemetry');
 const { ProductionReadinessService } = require('./utils/production-readiness-service');
 const { GenerationRecoveryService, GENERATION_STAGES } = require('./utils/generation-recovery-service');
@@ -70,6 +71,7 @@ class YouTubeAutomationAgent {
       this.db = new Database();
       await this.db.initialize();
       await this.db.markInterruptedJobs();
+      await sharedTracker.attachDatabase(this.db);
       this.recovery = new GenerationRecoveryService(this.db, {
         logger: this.logger,
         updateJobStage: (...args) => this.updateJobStage(...args)
@@ -188,7 +190,6 @@ class YouTubeAutomationAgent {
     const hasTTS = Boolean(
       creds.openai?.apiKey || process.env.OPENAI_API_KEY ||
       creds.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY ||
-      creds.azureSpeech?.subscriptionKey || process.env.AZURE_SPEECH_KEY ||
       hasGemini
     );
     const hasFFmpeg = await checkFFmpeg();
@@ -197,7 +198,7 @@ class YouTubeAutomationAgent {
     const capabilities = [
       { name: 'Script & strategy generation', ok: hasText, hint: 'configure an AI provider (npm run credentials:setup)' },
       { name: 'Image generation (visuals/thumbnails)', ok: hasImages, hint: 'requires an OpenAI or Gemini API key — otherwise gradient slides are used' },
-      { name: 'Voice narration (TTS)', ok: hasTTS, hint: 'configure OpenAI, Gemini, ElevenLabs, or Azure Speech — otherwise videos are silent' },
+      { name: 'Voice narration (TTS)', ok: hasTTS, hint: 'configure OpenAI, Gemini, or ElevenLabs — otherwise videos are silent' },
       { name: 'Video assembly (FFmpeg)', ok: hasFFmpeg, hint: ffmpegInstallHint() },
       { name: 'YouTube upload', ok: hasUpload, hint: 'run: npm run credentials:setup' }
     ];
@@ -591,6 +592,10 @@ class YouTubeAutomationAgent {
       } catch (error) {
         return res.status(error.status || 400).json({ success: false, error: error.message });
       }
+    });
+
+    this.app.get('/api/youtube/quota', (_req, res) => {
+      res.json({ success: true, quota: sharedTracker.snapshot() });
     });
 
     this.app.get('/api/readiness', async (_req, res) => {
@@ -1421,7 +1426,7 @@ class YouTubeAutomationAgent {
     if (strategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
         `SELECT COUNT(*) AS count FROM generation_jobs
-         WHERE source = 'autonomous_operator' AND status = 'completed'
+         WHERE source IN ('autonomous_operator', 'scheduler') AND status = 'completed'
          AND created_at >= datetime('now', '-7 days')`
       );
       const remaining = Math.max(1, strategy.cadence_per_week - Number(weeklyOutput?.count || 0));

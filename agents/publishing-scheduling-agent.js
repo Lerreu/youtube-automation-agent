@@ -1,4 +1,3 @@
-const { google } = require('googleapis');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
@@ -24,8 +23,7 @@ class PublishingSchedulingAgent {
 
   async setupYouTubeAPI() {
     try {
-      const auth = this.credentials.getYouTubeAuth();
-      this.youtube = google.youtube({ version: 'v3', auth });
+      this.youtube = this.credentials.getYouTubeClient();
       this.logger.info('YouTube API initialized');
     } catch (error) {
       this.logger.error('Failed to initialize YouTube API:', error);
@@ -164,6 +162,16 @@ class PublishingSchedulingAgent {
       try {
         uploadResult = await this.uploadToYouTube(scheduleEntry, options);
       } catch (error) {
+        if (error.code === 'YOUTUBE_QUOTA_EXHAUSTED' && !scheduleEntry.youtubeId) {
+          // Rejected before the upload was sent (or by YouTube's quota check):
+          // keep it scheduled so it goes out once the daily quota resets.
+          scheduleEntry.status = 'scheduled';
+          scheduleEntry.uploadAttempted = false;
+          scheduleEntry.error = error.message;
+          await this.db.updateScheduleEntry(scheduleEntry);
+          await this.syncShortStatus(scheduleEntry, 'scheduled', error.message);
+          throw error;
+        }
         if (scheduleEntry.uploadAttempted && this.isUploadOutcomeUnknown(error)) {
           scheduleEntry.status = 'reconciliation_required';
           scheduleEntry.error = 'Upload outcome is unknown; verify the YouTube channel before retrying';
@@ -466,6 +474,10 @@ class PublishingSchedulingAgent {
         if (error.code === 'READINESS_BLOCKED' || error.code === 'APPROVAL_REQUIRED') {
           this.logger.warn(error.message);
           continue;
+        }
+        if (error.code === 'YOUTUBE_QUOTA_EXHAUSTED') {
+          this.logger.warn(`Publish queue paused: ${error.message}`);
+          break;
         }
         this.logger.error(`Failed to auto-publish ${entry.title}:`, error);
         // Mark as failed but don't stop processing other items
