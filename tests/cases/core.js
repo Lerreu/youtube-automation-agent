@@ -182,9 +182,10 @@ const coreTests = {
       await db.initialize();
       return db;
     };
+    let db = null;
     try {
       // Fresh database: every migration is applied once.
-      let db = await open();
+      db = await open();
       const versions = (await db.getAllRows('SELECT version FROM schema_migrations ORDER BY version')).map(row => row.version);
       if (versions.join(',') !== MIGRATIONS.map(m => m.version).join(',')) throw new Error(`Unexpected applied migrations: ${versions}`);
 
@@ -199,6 +200,48 @@ const coreTests = {
       // Re-opening does not re-run anything.
       const rerun = await runMigrations(db);
       if (rerun.applied.length !== 0) throw new Error('Applied migrations ran again');
+
+      // Migration 3 keeps existing rows when it rebuilds a pre-v3 table.
+      // Older releases never enforced foreign keys, so they could hold such rows.
+      db.db.exec('PRAGMA foreign_keys = OFF');
+      await db.executeQuery('DELETE FROM schema_migrations WHERE version = 3');
+      await db.executeQuery('DROP TABLE publish_schedule');
+      await db.executeQuery(`CREATE TABLE publish_schedule (
+        id TEXT PRIMARY KEY, production_id TEXT NOT NULL, title TEXT NOT NULL, publish_time TEXT NOT NULL,
+        status TEXT DEFAULT 'scheduled', priority INTEGER DEFAULT 50, metadata TEXT, youtube_id TEXT,
+        youtube_url TEXT, published_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (production_id) REFERENCES productions(id))`);
+      await db.executeQuery("INSERT INTO publish_schedule (id, production_id, title, publish_time) VALUES ('legacy-row', 'short-legacy', 'Old Short', '2026-01-01T00:00:00Z')");
+      await db.close();
+      db = await open();
+      const kept = await db.getRow("SELECT title FROM publish_schedule WHERE id = 'legacy-row'");
+      const scheduleFks = await db.getAllRows("SELECT * FROM pragma_foreign_key_list('publish_schedule')");
+      const scheduleColumns = (await db.getAllRows('PRAGMA table_info(publish_schedule)')).map(column => column.name);
+      if (kept?.title !== 'Old Short' || scheduleFks.length || !scheduleColumns.includes('error_message')) {
+        throw new Error('Rebuilding publish_schedule lost rows, kept the clip-ID reference or missed new columns');
+      }
+
+      // Foreign keys are enforced for real references.
+      if ((await db.getRow('PRAGMA foreign_keys')).foreign_keys !== 1) throw new Error('Foreign keys are not enforced');
+      let rejected = false;
+      try {
+        await db.executeQuery("INSERT INTO generation_checkpoints (job_id, stage) VALUES ('missing-job', 'strategy')");
+      } catch (error) {
+        rejected = /FOREIGN KEY/.test(error.message);
+      }
+      if (!rejected) throw new Error('A checkpoint for a missing job was accepted');
+
+      // Shorts schedules (clip IDs) and scene history survive the stricter checks.
+      await db.saveScheduleEntry({ productionId: 'short-clip-1', title: 'A Short', publishTime: new Date().toISOString(), status: 'scheduled', priority: 60, metadata: {} });
+      const production = await db.saveProductionData({ id: 'fk-production',
+        strategy: {}, script: { title: 'FK production' }, thumbnail: {}, seo: {},
+        assets: {}, timeline: {}, status: 'ready', priority: 50, scheduledPublishTime: new Date().toISOString()
+      });
+      const sceneInput = [{ id: 'fk-scene-1', position: 0, label: 'Opening', scriptText: 'Hello', prompt: 'p', duration: 5 }];
+      await db.replaceProductionScenes(production, sceneInput);
+      await db.saveProductionSceneRevision({ productionId: production, sceneId: 'fk-scene-1', action: 'edit', before: {}, after: {} });
+      await db.replaceProductionScenes(production, [{ ...sceneInput[0], id: 'fk-scene-2' }]);
+      if ((await db.listProductionSceneRevisions(production, 10)).length !== 1) throw new Error('Scene history was lost when scenes were replaced');
 
       // A failing migration rolls back completely.
       const failing = [...MIGRATIONS, {
@@ -229,6 +272,7 @@ const coreTests = {
       if (!refused) throw new Error('Older code ran against a newer schema');
       await db.close();
     } finally {
+      await db?.close();
       await fsp.rm(dir, { recursive: true, force: true });
     }
     this.logger.info('Schema migrations test completed successfully');

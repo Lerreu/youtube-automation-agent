@@ -16,8 +16,59 @@ const MIGRATIONS = [
     // approval_required (human approval is now mandatory) and
     // publish_time_optimization (the fake optimizer was removed).
     up: db => db.executeQuery("DELETE FROM settings WHERE key IN ('approval_required', 'publish_time_optimization')")
+  },
+  {
+    version: 3,
+    name: 'drop_non_reference_foreign_keys',
+    // Foreign keys are enforced from this version on. Two declared references
+    // were never true references and are removed:
+    // - publish_schedule.production_id holds a production ID or a Shorts clip ID;
+    // - production_scene_revisions.scene_id is history that outlives replaced scenes.
+    up: async db => {
+      await rebuildTable(db, 'publish_schedule', `(
+        id TEXT PRIMARY KEY,
+        production_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        publish_time TEXT NOT NULL,
+        status TEXT DEFAULT 'scheduled',
+        priority INTEGER DEFAULT 50,
+        metadata TEXT,
+        youtube_id TEXT,
+        youtube_url TEXT,
+        published_at TEXT,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`);
+      await rebuildTable(db, 'production_scene_revisions', `(
+        id TEXT PRIMARY KEY,
+        production_id TEXT NOT NULL,
+        scene_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT DEFAULT 'completed',
+        before_state TEXT NOT NULL DEFAULT '{}',
+        after_state TEXT NOT NULL DEFAULT '{}',
+        cost_evidence TEXT NOT NULL DEFAULT '{}',
+        error TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT,
+        FOREIGN KEY (production_id) REFERENCES productions(id)
+      )`);
+    }
   }
 ];
+
+// SQLite cannot drop a constraint in place: create the new table, copy the
+// columns both versions share, then swap. Runs with foreign keys off.
+async function rebuildTable(db, table, definition) {
+  const temp = `${table}__rebuild`;
+  await db.executeQuery(`CREATE TABLE ${temp} ${definition}`);
+  const newColumns = new Set((await db.getAllRows(`PRAGMA table_info(${temp})`)).map(column => column.name));
+  const shared = (await db.getAllRows(`PRAGMA table_info(${table})`)).map(column => column.name).filter(name => newColumns.has(name));
+  const columns = shared.join(', ');
+  await db.executeQuery(`INSERT INTO ${temp} (${columns}) SELECT ${columns} FROM ${table}`);
+  await db.executeQuery(`DROP TABLE ${table}`);
+  await db.executeQuery(`ALTER TABLE ${temp} RENAME TO ${table}`);
+}
 
 function validate(migrations) {
   const versions = migrations.map(migration => migration.version);

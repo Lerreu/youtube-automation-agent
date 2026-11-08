@@ -28,17 +28,23 @@ class Database {
       // Ensure data directory exists
       await fs.mkdir(path.dirname(this.dbPath), { recursive: true });
       
-      // Connect to database
-      // Foreign keys stay off, as they were with the sqlite3 driver: Shorts are
-      // scheduled with a clip ID in publish_schedule.production_id, which the
-      // schema declares as a reference to productions.
+      // Migrations run with foreign keys off (SQLite's procedure for table
+      // rebuilds); enforcement is switched on right after.
       this.db = new DatabaseSync(this.dbPath, { enableForeignKeyConstraints: false });
       // Wait instead of failing if a backup or another tool briefly locks the file.
       this.db.exec('PRAGMA busy_timeout = 5000');
-      
-      // Create tables
+
       await this.createTables();
-      
+
+      this.db.exec('PRAGMA foreign_keys = ON');
+      // Rows written before enforcement may point at missing parents; they are
+      // left in place, but reported.
+      const orphans = await this.getAllRows('PRAGMA foreign_key_check');
+      if (orphans.length) {
+        const tables = [...new Set(orphans.map(row => row.table))].join(', ');
+        this.logger.warn(`${orphans.length} existing row(s) reference missing records (${tables}); new writes are checked.`);
+      }
+
       this.logger.success('Database initialized successfully');
       return true;
     } catch (error) {
