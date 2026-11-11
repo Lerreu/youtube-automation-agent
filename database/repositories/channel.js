@@ -11,8 +11,8 @@ const channelRepository = {
     await this.executeQuery(
       `INSERT OR REPLACE INTO channel_profiles (
         id, channel_name, goal, target_audience, brand_voice, default_style,
-        call_to_action, banned_topics, visual_style, timezone, created_at, updated_at
-      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))`,
+        call_to_action, banned_topics, visual_style, timezone, content_language, created_at, updated_at
+      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))`,
       [
         profile.channelName ?? current.channel_name ?? '',
         profile.goal ?? current.goal ?? '',
@@ -22,7 +22,8 @@ const channelRepository = {
         profile.callToAction ?? current.call_to_action ?? '',
         JSON.stringify(profile.bannedTopics ?? current.bannedTopics ?? []),
         profile.visualStyle ?? current.visual_style ?? '',
-        profile.timezone ?? current.timezone ?? 'America/Chicago',
+        profile.timezone ?? current.timezone ?? 'America/Sao_Paulo',
+        profile.contentLanguage ?? current.content_language ?? null,
         current.created_at || null
       ]
     );

@@ -1,5 +1,6 @@
 // Validation of API request bodies (generation, channel strategy, profile).
 // Methods of YouTubeAutomationAgent, merged into its prototype (see index.js).
+const { isSupportedLanguage } = require('../utils/content-language');
 const validationMethods = {
   validateGenerateRequestBody(body = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -157,6 +158,11 @@ const validationMethods = {
         if (value.length > 500) throw new Error(`${field} is too long`);
         result[field] = value;
       }
+    }
+    if (input.contentLanguage !== undefined) {
+      const code = String(input.contentLanguage).trim();
+      if (!isSupportedLanguage(code)) throw new Error(`Unsupported content language: ${code}`);
+      result.contentLanguage = code;
     }
     if (input.bannedTopics !== undefined) {
       const topics = Array.isArray(input.bannedTopics) ? input.bannedTopics : String(input.bannedTopics).split(',');

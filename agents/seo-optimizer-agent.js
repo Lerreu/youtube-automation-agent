@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { resolveLanguage, languageInstruction } = require('../utils/content-language');
 
 class SEOOptimizerAgent {
   constructor(db, credentials) {
@@ -20,7 +21,7 @@ class SEOOptimizerAgent {
       
       const aiSEO = await this.generateSEOWithAI(script, strategy);
       const { title, tags } = aiSEO;
-      const description = this.appendDescriptionFooter(aiSEO.description);
+      const description = this.appendDescriptionFooter(aiSEO.description, strategy.language);
       
       // Generate hashtags
       const hashtags = await this.generateHashtags(strategy);
@@ -48,7 +49,7 @@ class SEOOptimizerAgent {
           primaryKeyword: strategy.keywords[0],
           secondaryKeywords: strategy.keywords.slice(1, 5),
           targetLength: this.calculateOptimalLength(strategy.contentType),
-          language: 'en',
+          language: resolveLanguage(strategy.language).code,
           category: this.selectCategory(strategy)
         },
         createdAt: new Date().toISOString()
@@ -88,7 +89,8 @@ Content type: ${strategy.contentType}
 Target audience: ${strategy.targetAudience}
 Keywords: ${(strategy.keywords || []).join(', ')}
 Keep tags under YouTube's 500 character total guidance. Avoid fabricated statistics and unsupported claims.
-Do not include timestamps, links, contact details, music or asset credits, placeholders in brackets, or claims about the creator; those are added separately from real data.`;
+Do not include timestamps, links, contact details, music or asset credits, placeholders in brackets, or claims about the creator; those are added separately from real data.
+${languageInstruction(strategy.language)} Tags must be search terms that speakers of that language actually type.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
@@ -116,12 +118,13 @@ Do not include timestamps, links, contact details, music or asset credits, place
     }
   }
 
-  appendDescriptionFooter(description) {
+  appendDescriptionFooter(description, language) {
     // Only real values from .env; nothing is printed when a value is not configured.
+    const labels = resolveLanguage(language).phrases.footer;
     const lines = [
-      ['Website', process.env.WEBSITE_URL],
-      ['Social', process.env.SOCIAL_LINKS],
-      ['Business inquiries', process.env.BUSINESS_EMAIL]
+      [labels.website, process.env.WEBSITE_URL],
+      [labels.social, process.env.SOCIAL_LINKS],
+      [labels.business, process.env.BUSINESS_EMAIL]
     ]
       .map(([label, value]) => [label, String(value || '').trim()])
       .filter(([, value]) => value)

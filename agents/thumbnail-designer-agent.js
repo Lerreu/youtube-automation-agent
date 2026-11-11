@@ -1,6 +1,7 @@
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const { resolveLanguage } = require('../utils/content-language');
 const { Logger } = require('../utils/logger');
 
 class ThumbnailDesignerAgent {
@@ -150,8 +151,9 @@ class ThumbnailDesignerAgent {
 
   generateSecondaryText(script) {
     // A plain label for the format; no hype or promises the video may not keep.
-    const labels = { Tutorial: 'STEP BY STEP', Review: 'REVIEW', List: 'THE LIST', Explainer: 'EXPLAINED' };
-    return labels[script.metadata?.strategy?.contentType] || '';
+    const strategy = script.metadata?.strategy;
+    const labels = resolveLanguage(strategy?.language).phrases.formatLabels;
+    return labels[strategy?.contentType] || '';
   }
 
   selectComposition() {

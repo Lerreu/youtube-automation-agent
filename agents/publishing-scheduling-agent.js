@@ -1,6 +1,7 @@
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
+const { resolveLanguage } = require('../utils/content-language');
 const { Logger } = require('../utils/logger');
 const { assertValidYouTubeMetadata } = require('../utils/youtube-metadata-validator');
 const { detectSyntheticMedia } = require('../utils/synthetic-media');
@@ -284,7 +285,7 @@ class PublishingSchedulingAgent {
     
     // Upload captions
     if (metadata.captions && metadata.captions.path) {
-      await this.uploadCaptions(videoId, metadata.captions.path);
+      await this.uploadCaptions(videoId, metadata.captions.path, metadata.captions.language);
     }
     
     return videoUpload.data;
@@ -423,7 +424,8 @@ class PublishingSchedulingAgent {
     return { videoId, title, thumbnailPath: packaging.thumbnailPath };
   }
 
-  async uploadCaptions(videoId, captionsPath) {
+  async uploadCaptions(videoId, captionsPath, languageCode) {
+    const language = resolveLanguage(languageCode);
     try {
       const captionsContent = await fs.readFile(captionsPath, 'utf8');
       
@@ -432,8 +434,8 @@ class PublishingSchedulingAgent {
         requestBody: {
           snippet: {
             videoId: videoId,
-            language: 'en',
-            name: 'English Captions',
+            language: language.code,
+            name: language.captionName,
             isDraft: false
           }
         },

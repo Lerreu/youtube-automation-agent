@@ -129,7 +129,7 @@ const contentTests = {
       if (bare.description !== 'How to fix sour espresso.') throw new Error(`SEO description gained unconfigured content: ${bare.description}`);
       process.env.BUSINESS_EMAIL = 'hello@example.com';
       const withEmail = await seoAgent.optimize(script, strategy);
-      if (!withEmail.description.endsWith('Business inquiries: hello@example.com') || /Audio Library|\[Your/.test(withEmail.description)) {
+      if (!withEmail.description.endsWith('Contato comercial: hello@example.com') || /Audio Library|\[Your/.test(withEmail.description)) {
         throw new Error('SEO footer was not built only from configured values');
       }
       const emptyTagsScore = await seoAgent.calculateSEOScore('Title', 'Description', []);

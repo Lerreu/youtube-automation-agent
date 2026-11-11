@@ -641,7 +641,7 @@ const schemaRepository = {
       ['content_backup_enabled', 'true', 'Enable content backup'],
       ['notification_enabled', 'true', 'Enable system notifications'],
       ['automation_paused', 'false', 'Pause generation and publishing automation'],
-      ['channel_timezone', 'America/Chicago', 'Timezone used to present channel schedules'],
+      ['channel_timezone', 'America/Sao_Paulo', 'Timezone used to present channel schedules'],
       ['max_daily_posts', '1', 'Maximum posts per day'],
       ['content_buffer_days', '3', 'Days of content to keep in buffer'],
       ['video_provider', 'slideshow', 'Video provider: slideshow, auto, seedance, minimax_h3, google_omni, kling, or wan'],
@@ -666,15 +666,15 @@ const schemaRepository = {
         call_to_action, banned_topics, visual_style, timezone
       ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        process.env.CHANNEL_NAME || 'My YouTube Channel',
-        'Grow a trusted, useful YouTube channel',
-        process.env.TARGET_AUDIENCE || 'General audience',
-        'Clear, credible, and engaging',
+        process.env.CHANNEL_NAME || 'Meu canal do YouTube',
+        'Construir um canal do YouTube útil e confiável',
+        process.env.TARGET_AUDIENCE || 'Público geral',
+        'Clara, confiável e envolvente',
         'explainer',
-        'Subscribe for more useful videos.',
+        'Inscreva-se para ver mais vídeos úteis.',
         '[]',
         'Clean, high-contrast, and readable',
-        process.env.CHANNEL_TIMEZONE || 'America/Chicago'
+        process.env.CHANNEL_TIMEZONE || 'America/Sao_Paulo'
       ]
     );
   }

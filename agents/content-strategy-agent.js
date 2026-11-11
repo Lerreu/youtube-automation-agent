@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { resolveLanguage, languageInstruction, regionFor } = require('../utils/content-language');
 
 class ContentStrategyAgent {
   constructor(db, credentials) {
@@ -10,10 +11,24 @@ class ContentStrategyAgent {
     this.competitorData = [];
     this.contentCalendar = [];
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
+    this.language = resolveLanguage().code;
+  }
+
+  // The channel's content language (Channel setup), re-read before each run so
+  // a change in the dashboard applies to the next video.
+  async refreshLanguage() {
+    try {
+      const profile = await this.db.getChannelProfile();
+      this.language = resolveLanguage(profile?.content_language).code;
+    } catch (_error) {
+      this.language = resolveLanguage().code;
+    }
+    return this.language;
   }
 
   async initialize() {
     this.logger.info('Initializing Content Strategy Agent...');
+    await this.refreshLanguage();
     await this.loadHistoricalData();
     await this.analyzeTrends();
     return true;
@@ -56,7 +71,7 @@ class ContentStrategyAgent {
         part: 'snippet,statistics',
         chart: 'mostPopular',
         maxResults: 50,
-        regionCode: process.env.YOUTUBE_REGION || 'US'
+        regionCode: regionFor(this.language)
       });
 
       return response.data.items.map(video => ({
@@ -228,7 +243,10 @@ class ContentStrategyAgent {
 
   async generateContentStrategy(requestedTopic = null) {
     try {
+      await this.refreshLanguage();
       const strategy = await this.generateContentStrategyWithAI(requestedTopic);
+      // Every later stage (script, SEO, thumbnail, captions, upload) reads it from here.
+      strategy.language = this.language;
       await this.db.saveContentStrategy(strategy);
       this.logger.info(`Generated AI strategy for: ${strategy.topic}`);
       return strategy;
@@ -240,6 +258,7 @@ class ContentStrategyAgent {
 
   async researchAndPlanChannel(channelStrategy) {
     const targetCount = Math.max(1, Math.min(5, Number(channelStrategy.videos_per_run || 1)));
+    await this.refreshLanguage();
     await this.analyzeTrends();
 
     const recentRows = await this.db.getAllRows(
@@ -313,7 +332,8 @@ Allowed source catalog: ${JSON.stringify(research.sourceCatalog)}
 Recent topics to avoid repeating: ${JSON.stringify(research.recentTopics)}
 Operator-approved performance learnings to apply: ${JSON.stringify(research.approvedLearnings)}
 
-Do not invent trend data, statistics, sources, URLs, or factual claims. Use only exact URLs from the supplied source catalog. Apply only the supplied approved learnings; pending or rejected recommendations are not authorized. Prefer evergreen topics when the supplied signals are weak. Learnings with category "audience_demand" are audience-requested topics mined from real comments on published videos; prefer planning a video that directly answers one when it fits the channel objective, and cite it in the rationale.`;
+Do not invent trend data, statistics, sources, URLs, or factual claims. Use only exact URLs from the supplied source catalog. Apply only the supplied approved learnings; pending or rejected recommendations are not authorized. Prefer evergreen topics when the supplied signals are weak. Learnings with category "audience_demand" are audience-requested topics mined from real comments on published videos; prefer planning a video that directly answers one when it fits the channel objective, and cite it in the rationale.
+${languageInstruction(this.language)} The "pillar" value must stay exactly as written in the supplied content pillars. Write "rationale" in Brazilian Portuguese, the operator's language.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, { maxTokens: 1800, temperature: 0.65 });
@@ -331,7 +351,8 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .map(signal => signal.topic)
       .filter(topic => topic.includes(' ') && topic.length >= 8 && !recent.has(topic.toLowerCase()));
     const pillars = channelStrategy.contentPillars || [];
-    const pillarTopics = pillars.map(pillar => `${pillar}: a practical guide for ${channelStrategy.audience}`);
+    const pillarGuide = resolveLanguage(this.language).phrases.pillarGuide;
+    const pillarTopics = pillars.map(pillar => pillarGuide(pillar, channelStrategy.audience));
     // Only real signals and the channel's own pillars; no generic off-niche topics.
     const candidates = [...readableSignals, ...pillarTopics];
 
@@ -406,7 +427,8 @@ Return only valid JSON with this exact shape:
 Requested topic: ${requestedTopic || 'none'}
 Trending topics available: ${trendingTopics || 'Technology Trends'}
 Channel target audience: ${process.env.TARGET_AUDIENCE || 'General audience interested in educational content'}
-Avoid fabricated claims and unsupported numbers.`;
+Avoid fabricated claims and unsupported numbers.
+${languageInstruction(this.language)} When the requested topic is in another language, keep its meaning and write it in the channel language.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {

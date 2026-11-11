@@ -8,6 +8,7 @@ const { publishingTests } = require('./tests/cases/publishing');
 const { contentTests } = require('./tests/cases/content');
 const { regressionTests } = require('./tests/cases/regressions');
 const { engagementTests } = require('./tests/cases/engagement');
+const { languageTests } = require('./tests/cases/language');
 
 class SystemTest {
   constructor() {
@@ -52,6 +53,7 @@ class SystemTest {
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Strategy Honesty', test: () => this.testEvergreenTopics() },
       { name: 'Content Honesty', test: () => this.testContentHonesty() },
+      { name: 'Content Language', test: () => this.testContentLanguage() },
       { name: 'Reliability', test: () => this.testReliability() },
       { name: 'Schema Migrations', test: () => this.testSchemaMigrations() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
@@ -145,7 +147,8 @@ Object.assign(
   publishingTests,
   contentTests,
   regressionTests,
-  engagementTests
+  engagementTests,
+  languageTests
 );
 
 // Run tests if called directly

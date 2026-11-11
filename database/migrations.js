@@ -54,6 +54,18 @@ const MIGRATIONS = [
         FOREIGN KEY (production_id) REFERENCES productions(id)
       )`);
     }
+  },
+  {
+    version: 4,
+    name: 'channel_content_language',
+    // Language every production of the channel is written and narrated in.
+    // NULL means the default (see utils/content-language.js).
+    up: async db => {
+      const columns = (await db.getAllRows('PRAGMA table_info(channel_profiles)')).map(column => column.name);
+      if (!columns.includes('content_language')) {
+        await db.executeQuery('ALTER TABLE channel_profiles ADD COLUMN content_language TEXT');
+      }
+    }
   }
 ];
 

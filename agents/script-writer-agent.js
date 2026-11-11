@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { resolveLanguage, languageInstruction } = require('../utils/content-language');
 
 class ScriptWriterAgent {
   constructor(db, credentials) {
@@ -99,7 +100,8 @@ Channel constraints: ${strategy.channelConstraints || 'none beyond the factual-s
 Preferred call to action: ${strategy.callToAction || 'invite the viewer to subscribe'}
 Keywords: ${(strategy.keywords || []).join(', ')}
 Research sources: ${JSON.stringify(strategy.researchSources || [])}
-Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, credentials, research effort or audience size for the narrator. The recap must only summarize the sections you wrote. List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
+Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, credentials, research effort or audience size for the narrator. The recap must only summarize the sections you wrote. List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.
+${languageInstruction(strategy.language)} The script is narrated as written, so it must read naturally aloud in that language.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
@@ -233,23 +235,25 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim p
   }
 
   normalizeAICTA(cta, strategy) {
+    // Fallback lines are spoken, so they follow the channel language.
+    const phrases = resolveLanguage(strategy.language).phrases;
     if (cta && typeof cta === 'object') {
       return {
         type: 'call_to_action',
-        subscribe: String(cta.subscribe || cta.text || `Subscribe for more on ${strategy.topic}.`),
-        like: String(cta.like || 'Like this video if it helped.'),
-        comment: String(cta.comment || `Share your experience with ${strategy.topic} in the comments.`),
-        nextVideo: String(cta.nextVideo || 'Watch the next related video for more context.'),
+        subscribe: String(cta.subscribe || cta.text || phrases.subscribe(strategy.topic)),
+        like: String(cta.like || phrases.like),
+        comment: String(cta.comment || phrases.comment(strategy.topic)),
+        nextVideo: String(cta.nextVideo || phrases.nextVideo),
         duration: '15 seconds'
       };
     }
 
     return {
       type: 'call_to_action',
-      subscribe: String(cta || `Subscribe for more practical videos about ${strategy.topic}.`),
-      like: 'Like this video if it helped.',
-      comment: `Share your experience with ${strategy.topic} in the comments.`,
-      nextVideo: 'Watch the next related video for more context.',
+      subscribe: String(cta || phrases.subscribePractical(strategy.topic)),
+      like: phrases.like,
+      comment: phrases.comment(strategy.topic),
+      nextVideo: phrases.nextVideo,
       duration: '15 seconds'
     };
   }
