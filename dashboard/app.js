@@ -847,6 +847,26 @@ function renderActivation(activation = {}) {
   }
 }
 
+// The dashboard refreshes every few seconds; a form with edits the operator
+// has not saved yet is left alone until it is saved.
+function trackUnsaved(form) {
+  const mark = () => {
+    form.dataset.unsaved = 'true';
+    form.querySelector('.unsaved-note')?.classList.remove('hidden');
+  };
+  form.addEventListener('input', mark);
+  form.addEventListener('change', mark);
+}
+
+function hasUnsaved(form) {
+  return form.dataset.unsaved === 'true';
+}
+
+function clearUnsaved(form) {
+  delete form.dataset.unsaved;
+  form.querySelector('.unsaved-note')?.classList.add('hidden');
+}
+
 function renderOperator(strategy, runs, system) {
   const form = $('#strategy-form');
   const mapping = strategy ? {
@@ -866,7 +886,7 @@ function renderOperator(strategy, runs, system) {
     outcomeCurrency: strategy.outcome_currency,
     constraints: strategy.constraints
   } : {};
-  for (const [name, value] of Object.entries(mapping)) {
+  for (const [name, value] of Object.entries(hasUnsaved(form) ? {} : mapping)) {
     if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value ?? '';
   }
 
@@ -928,17 +948,18 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
     timezone: profile.timezone,
     bannedTopics: (profile.bannedTopics || []).join(', ')
   };
-  for (const [name, value] of Object.entries(mapping)) {
+  const keepEdits = hasUnsaved(form);
+  for (const [name, value] of Object.entries(keepEdits ? {} : mapping)) {
     if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value || '';
   }
-  $('#notifications-enabled').checked = settings.notification_enabled !== 'false';
+  if (!keepEdits) $('#notifications-enabled').checked = settings.notification_enabled !== 'false';
   const videoMapping = {
     videoProvider: settings.video_provider || 'slideshow',
     videoGenerationMode: settings.video_generation_mode || 'hybrid',
     videoClipDuration: settings.video_clip_duration || '8',
     videoMaxGeneratedSeconds: settings.video_max_generated_seconds || '60'
   };
-  for (const [name, value] of Object.entries(videoMapping)) {
+  for (const [name, value] of Object.entries(keepEdits ? {} : videoMapping)) {
     if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value;
   }
   const selected = providers.find(provider => provider.id === videoMapping.videoProvider);
@@ -1848,12 +1869,18 @@ function strategyFormData(status = ui.state?.channelStrategy?.status || 'draft')
 
 $('#strategy-form').addEventListener('submit', async event => {
   event.preventDefault();
-  await mutate('/api/operator/strategy', 'PUT', strategyFormData(), 'Estratégia do canal salva.').catch(() => {});
+  try {
+    await mutate('/api/operator/strategy', 'PUT', strategyFormData(), 'Estratégia do canal salva.');
+    clearUnsaved(event.currentTarget);
+  } catch (_error) { /* toast already shown; edits stay on screen */ }
 });
 
 $('#activate-operator-button').addEventListener('click', async () => {
   if (!$('#strategy-form').reportValidity()) return;
-  await mutate('/api/operator/start', 'POST', strategyFormData('active'), 'Operador autônomo iniciado.').catch(() => {});
+  try {
+    await mutate('/api/operator/start', 'POST', strategyFormData('active'), 'Operador autônomo iniciado.');
+    clearUnsaved($('#strategy-form'));
+  } catch (_error) { /* toast already shown; edits stay on screen */ }
 });
 
 $('#pause-operator-button').addEventListener('click', async () => {
@@ -1908,12 +1935,16 @@ $('#profile-form').addEventListener('submit', async event => {
       video_clip_duration: Number(values.videoClipDuration),
       video_max_generated_seconds: Number(values.videoMaxGeneratedSeconds)
     }, 'Configurações do operador salvas.');
+    clearUnsaved(event.currentTarget);
   } catch (_error) { /* toast already shown */ }
 });
 
 $('#api-key-button').addEventListener('click', () => {
   if (requestApiKey() !== null) showToast('Chave da API do painel salva neste navegador.');
 });
+
+trackUnsaved($('#strategy-form'));
+trackUnsaved($('#profile-form'));
 
 const initialView = location.hash.slice(1);
 if (['overview', 'operator', 'pipeline', 'calendar', 'analytics', 'engagement', 'readiness', 'settings'].includes(initialView)) switchView(initialView);
