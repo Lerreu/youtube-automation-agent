@@ -30,74 +30,74 @@ class DailyAutomation {
   async setupScheduledTasks() {
     // Daily content generation at 6:00 AM
     this.scheduledTasks.set('daily-content-generation', 
-      cron.schedule('0 6 * * *', async () => {
+      cron.createTask('0 6 * * *', async () => {
         if (this.isEnabled) {
           await this.runDailyContentGeneration();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Publishing queue processing every 15 minutes
     this.scheduledTasks.set('publish-queue-processing',
-      cron.schedule('*/15 * * * *', async () => {
+      cron.createTask('*/15 * * * *', async () => {
         if (this.isEnabled) {
           await this.processPublishQueue();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Analytics collection at 9:00 AM daily
     this.scheduledTasks.set('daily-analytics',
-      cron.schedule('0 9 * * *', async () => {
+      cron.createTask('0 9 * * *', async () => {
         if (this.isEnabled) {
           await this.collectDailyAnalytics();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Weekly strategy review on Sundays at 8:00 AM
     this.scheduledTasks.set('weekly-strategy-review',
-      cron.schedule('0 8 * * 0', async () => {
+      cron.createTask('0 8 * * 0', async () => {
         if (this.isEnabled) {
           await this.weeklyStrategyReview();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Optimization tasks daily at 10:00 PM
     this.scheduledTasks.set('daily-optimization',
-      cron.schedule('0 22 * * *', async () => {
+      cron.createTask('0 22 * * *', async () => {
         if (this.isEnabled) {
           await this.runDailyOptimization();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Database maintenance weekly on Saturdays at 3:00 AM
     this.scheduledTasks.set('database-maintenance',
-      cron.schedule('0 3 * * 6', async () => {
+      cron.createTask('0 3 * * 6', async () => {
         if (this.isEnabled) {
           await this.databaseMaintenance();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Audience comment sync every 4 hours; the service's own taper decides which videos are due
     this.scheduledTasks.set('audience-engagement-sync',
-      cron.schedule('0 */4 * * *', async () => {
+      cron.createTask('0 */4 * * *', async () => {
         if (this.isEnabled) {
           await this.collectAudienceEngagement();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Collect controlled experiment evidence and advance only pre-approved arms.
     this.scheduledTasks.set('growth-experiment-refresh',
-      cron.schedule('30 */4 * * *', async () => {
+      cron.createTask('30 */4 * * *', async () => {
         if (this.isEnabled) {
           await this.refreshGrowthExperiments();
         }
-      }, { scheduled: false })
+      })
     );
 
     // Start all scheduled tasks
@@ -130,49 +130,9 @@ class DailyAutomation {
         return;
       }
 
-      // Generate content strategy
-      const strategy = await this.agents.strategy.generateContentStrategy();
-      this.logger.info(`Generated strategy: ${strategy.topic}`);
-
-      // Generate script
-      const script = await this.agents.scriptWriter.generateScript(strategy);
-      this.logger.info(`Generated script: ${script.title}`);
-
-      // Generate thumbnail
-      const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
-      this.logger.info('Generated thumbnail');
-
-      // Optimize SEO
-      const seoData = await this.agents.seoOptimizer.optimize(script, strategy);
-      this.logger.info('Completed SEO optimization');
-
-      // Process through production
-      const productionData = await this.agents.production.processContent({
-        strategy,
-        script,
-        thumbnail,
-        seo: seoData
-      });
-      this.logger.info(`Production completed: ${productionData.id}`);
-
-      // Schedule for publishing (returns null when only placeholder assets were produced)
-      const scheduleEntry = await this.agents.publishing.scheduleContent(productionData);
-      if (scheduleEntry) {
-        this.logger.info('Content scheduled for publishing');
-      } else {
-        this.logger.warn('Content was NOT scheduled — production produced placeholder assets. See warnings above.');
-      }
-
-      timer.end();
-      this.logger.success('Daily content generation completed successfully');
-
-      // Log the event
-      await this.logAutomationEvent('daily_content_generation', 'success', {
-        contentId: productionData.id,
-        topic: strategy.topic,
-        scheduledFor: productionData.scheduledPublishTime
-      });
-
+      // The old inline pipeline scheduled content without human review. Generation
+      // must go through the injected job queue, which always stops at review.
+      throw new Error('Scheduler has no generateContent service; refusing to generate content outside the review pipeline');
     } catch (error) {
       this.logger.error('Daily content generation failed:', error);
       
@@ -202,7 +162,7 @@ class DailyAutomation {
     if (channelStrategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
         `SELECT COUNT(*) AS count FROM generation_jobs
-         WHERE source = 'autonomous_operator' AND status = 'completed'
+         WHERE source IN ('autonomous_operator', 'scheduler') AND status = 'completed'
          AND created_at >= datetime('now', '-7 days')`
       );
       if (Number(weeklyOutput?.count || 0) >= channelStrategy.cadence_per_week) return false;
@@ -347,9 +307,6 @@ class DailyAutomation {
         this.logger.info(`Top performing topics: ${bestPerformingTopics.join(', ')}`);
       }
 
-      // Optimize publishing times
-      await this.agents.publishing.optimizePublishTimes();
-      
       // Generate strategy insights
       const insights = await this.generateWeeklyInsights(weeklyAnalytics);
       
@@ -458,18 +415,22 @@ class DailyAutomation {
 
   async optimizeExistingContent() {
     // Get videos published in last 30 days with low performance
+    // analytics_reports.video_id holds the YouTube video ID, so join on youtube_id.
     const lowPerformingVideos = await this.db.getAllRows(
-      `SELECT ar.* FROM analytics_reports ar
-       JOIN publish_schedule ps ON ar.video_id = ps.id
-       WHERE ar.performance_score < 50 
+      `SELECT DISTINCT ar.video_id FROM analytics_reports ar
+       JOIN publish_schedule ps ON ar.video_id = ps.youtube_id
+       WHERE ar.performance_score < 50
        AND ps.published_at > datetime('now', '-30 days')
        LIMIT 5`
     );
-    
+
     for (const video of lowPerformingVideos) {
-      // Re-analyze and generate optimization suggestions
-      await this.agents.analytics.analyzeVideoPerformance(video.video_id);
-      this.logger.info(`Re-analyzed low performing video: ${video.video_id}`);
+      try {
+        await this.agents.analytics.analyzeVideoPerformance(video.video_id);
+        this.logger.info(`Re-analyzed low performing video: ${video.video_id}`);
+      } catch (error) {
+        this.logger.warn(`Could not re-analyze ${video.video_id}: ${error.message}`);
+      }
     }
   }
 
@@ -547,7 +508,7 @@ class DailyAutomation {
 
   async logAutomationEvent(eventType, status, data = {}) {
     await this.db.executeQuery(
-      'INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime("now"))',
+      "INSERT INTO automation_events (event_type, status, data, created_at) VALUES (?, ?, ?, datetime('now'))",
       [eventType, status, JSON.stringify(data)]
     );
   }

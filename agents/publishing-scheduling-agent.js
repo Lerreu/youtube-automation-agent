@@ -1,9 +1,10 @@
-const { google } = require('googleapis');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
+const { resolveLanguage } = require('../utils/content-language');
 const { Logger } = require('../utils/logger');
 const { assertValidYouTubeMetadata } = require('../utils/youtube-metadata-validator');
+const { detectSyntheticMedia } = require('../utils/synthetic-media');
 
 class PublishingSchedulingAgent {
   constructor(db, credentials) {
@@ -23,8 +24,7 @@ class PublishingSchedulingAgent {
 
   async setupYouTubeAPI() {
     try {
-      const auth = this.credentials.getYouTubeAuth();
-      this.youtube = google.youtube({ version: 'v3', auth });
+      this.youtube = this.credentials.getYouTubeClient();
       this.logger.info('YouTube API initialized');
     } catch (error) {
       this.logger.error('Failed to initialize YouTube API:', error);
@@ -123,10 +123,13 @@ class PublishingSchedulingAgent {
         }
       }
       this.logger.info(`Publishing content: ${contentId}`);
-      
+
       let scheduleEntry = this.publishQueue.find(entry =>
         entry.productionId === contentId || entry.id === contentId
       );
+      // Human approval is enforced here, at the last step before upload, so no
+      // caller (scheduler, queue, publish-now, Shorts) can bypass it.
+      await this.assertHumanApproval(scheduleEntry?.metadata?.sourceProductionId || contentId, productionBundle);
       if (!scheduleEntry && this.db.getLatestScheduleEntry) {
         scheduleEntry = await this.db.getLatestScheduleEntry(contentId);
       }
@@ -160,6 +163,16 @@ class PublishingSchedulingAgent {
       try {
         uploadResult = await this.uploadToYouTube(scheduleEntry, options);
       } catch (error) {
+        if (error.code === 'YOUTUBE_QUOTA_EXHAUSTED' && !scheduleEntry.youtubeId) {
+          // Rejected before the upload was sent (or by YouTube's quota check):
+          // keep it scheduled so it goes out once the daily quota resets.
+          scheduleEntry.status = 'scheduled';
+          scheduleEntry.uploadAttempted = false;
+          scheduleEntry.error = error.message;
+          await this.db.updateScheduleEntry(scheduleEntry);
+          await this.syncShortStatus(scheduleEntry, 'scheduled', error.message);
+          throw error;
+        }
         if (scheduleEntry.uploadAttempted && this.isUploadOutcomeUnknown(error)) {
           scheduleEntry.status = 'reconciliation_required';
           scheduleEntry.error = 'Upload outcome is unknown; verify the YouTube channel before retrying';
@@ -196,6 +209,23 @@ class PublishingSchedulingAgent {
     }
   }
 
+  async assertHumanApproval(productionId, loadedBundle = null) {
+    const bundle = loadedBundle?.id === productionId
+      ? loadedBundle
+      : await this.db.getProductionBundle?.(productionId);
+    const editorData = bundle?.editorData || {};
+    const approved = bundle?.review_status === 'approved'
+      && Boolean(bundle.reviewed_at)
+      && editorData.factChecked === true
+      && editorData.rightsConfirmed === true;
+    if (!approved) {
+      const error = new Error('Publishing is blocked until a human approves this content (fact check and media rights confirmed)');
+      error.status = 409;
+      error.code = 'APPROVAL_REQUIRED';
+      throw error;
+    }
+  }
+
   async uploadToYouTube(scheduleEntry, options = {}) {
     const { metadata } = scheduleEntry;
     const validation = assertValidYouTubeMetadata(metadata.seo);
@@ -219,8 +249,12 @@ class PublishingSchedulingAgent {
       },
       status: {
         privacyStatus: futureSchedule ? 'private' : requestedPrivacy,
-        selfDeclaredMadeForKids: false,
+        selfDeclaredMadeForKids: typeof metadata.madeForKids === 'boolean'
+          ? metadata.madeForKids
+          : process.env.YOUTUBE_MADE_FOR_KIDS === 'true',
+        // Re-check at upload time so no earlier step can drop a required AI disclosure.
         containsSyntheticMedia: metadata.containsSyntheticMedia === true
+          || detectSyntheticMedia({ assets: { finalVideo: metadata.video, audio: metadata.audio } }).containsSyntheticMedia
       }
     };
     if (futureSchedule) videoMetadata.status.publishAt = scheduleEntry.publishTime;
@@ -251,7 +285,7 @@ class PublishingSchedulingAgent {
     
     // Upload captions
     if (metadata.captions && metadata.captions.path) {
-      await this.uploadCaptions(videoId, metadata.captions.path);
+      await this.uploadCaptions(videoId, metadata.captions.path, metadata.captions.language);
     }
     
     return videoUpload.data;
@@ -390,7 +424,8 @@ class PublishingSchedulingAgent {
     return { videoId, title, thumbnailPath: packaging.thumbnailPath };
   }
 
-  async uploadCaptions(videoId, captionsPath) {
+  async uploadCaptions(videoId, captionsPath, languageCode) {
+    const language = resolveLanguage(languageCode);
     try {
       const captionsContent = await fs.readFile(captionsPath, 'utf8');
       
@@ -399,8 +434,8 @@ class PublishingSchedulingAgent {
         requestBody: {
           snippet: {
             videoId: videoId,
-            language: 'en',
-            name: 'English Captions',
+            language: language.code,
+            name: language.captionName,
             isDraft: false
           }
         },
@@ -438,9 +473,13 @@ class PublishingSchedulingAgent {
         await this.publishContent(entry.productionId);
         this.logger.info(`Auto-published: ${entry.title}`);
       } catch (error) {
-        if (error.code === 'READINESS_BLOCKED') {
+        if (error.code === 'READINESS_BLOCKED' || error.code === 'APPROVAL_REQUIRED') {
           this.logger.warn(error.message);
           continue;
+        }
+        if (error.code === 'YOUTUBE_QUOTA_EXHAUSTED') {
+          this.logger.warn(`Publish queue paused: ${error.message}`);
+          break;
         }
         this.logger.error(`Failed to auto-publish ${entry.title}:`, error);
         // Mark as failed but don't stop processing other items
@@ -465,100 +504,6 @@ class PublishingSchedulingAgent {
         return publishTime >= now && publishTime <= endDate;
       })
       .sort((a, b) => new Date(a.publishTime) - new Date(b.publishTime));
-  }
-
-  async optimizePublishTimes() {
-    // Analyze channel analytics to find optimal publish times
-    const analytics = await this.getChannelAnalytics();
-    const optimalTimes = this.calculateOptimalTimes(analytics);
-    
-    // Update scheduled content with better times
-    for (const entry of this.publishQueue) {
-      if (entry.status === 'scheduled') {
-        const currentTime = new Date(entry.publishTime);
-        const betterTime = this.findBetterTime(currentTime, optimalTimes);
-        
-        if (betterTime && betterTime.getTime() !== currentTime.getTime()) {
-          entry.publishTime = betterTime.toISOString();
-          await this.db.updateScheduleEntry(entry);
-          this.logger.info(`Optimized publish time for: ${entry.title}`);
-        }
-      }
-    }
-  }
-
-  async getChannelAnalytics() {
-    try {
-      // Get channel analytics for the last 30 days
-      const response = await this.youtube.channels.list({
-        part: 'statistics',
-        mine: true
-      });
-      
-      // In a full implementation, you'd use YouTube Analytics API
-      // For now, we'll return simulated data
-      return {
-        totalViews: response.data.items[0]?.statistics?.viewCount || 0,
-        subscribers: response.data.items[0]?.statistics?.subscriberCount || 0,
-        videos: response.data.items[0]?.statistics?.videoCount || 0,
-        optimalDays: ['Tuesday', 'Wednesday', 'Thursday'], // Most active days
-        optimalHours: [14, 15, 16, 20] // Most active hours
-      };
-    } catch (error) {
-      this.logger.error('Failed to get channel analytics:', error);
-      return {
-        optimalDays: ['Tuesday', 'Wednesday', 'Thursday'],
-        optimalHours: [14, 15, 16]
-      };
-    }
-  }
-
-  calculateOptimalTimes(analytics) {
-    const { optimalDays, optimalHours } = analytics;
-    
-    return {
-      bestDays: optimalDays,
-      bestHours: optimalHours,
-      worstDays: ['Monday', 'Friday'],
-      worstHours: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 22, 23]
-    };
-  }
-
-  findBetterTime(currentTime, optimalTimes) {
-    const currentDay = currentTime.toLocaleDateString('en-US', { weekday: 'long' });
-    const currentHour = currentTime.getHours();
-    
-    // If current time is already optimal, return null
-    if (optimalTimes.bestDays.includes(currentDay) && 
-        optimalTimes.bestHours.includes(currentHour)) {
-      return null;
-    }
-    
-    // Find the next optimal time
-    const nextOptimalTime = new Date(currentTime);
-    
-    // Try to find an optimal hour on the same day
-    for (const hour of optimalTimes.bestHours) {
-      if (hour > currentHour) {
-        nextOptimalTime.setHours(hour, 0, 0, 0);
-        if (optimalTimes.bestDays.includes(currentDay)) {
-          return nextOptimalTime;
-        }
-      }
-    }
-    
-    // Find next optimal day
-    for (let i = 1; i <= 7; i++) {
-      const testDate = new Date(currentTime.getTime() + (i * 24 * 60 * 60 * 1000));
-      const testDay = testDate.toLocaleDateString('en-US', { weekday: 'long' });
-      
-      if (optimalTimes.bestDays.includes(testDay)) {
-        testDate.setHours(optimalTimes.bestHours[0], 0, 0, 0);
-        return testDate;
-      }
-    }
-    
-    return null; // No better time found
   }
 
   async createPublishingReport() {

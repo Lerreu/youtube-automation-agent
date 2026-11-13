@@ -121,7 +121,7 @@ PORT=3456
 LOG_LEVEL=info
 
 # YouTube Settings
-YOUTUBE_REGION=US
+# YOUTUBE_REGION is optional: unset follows the channel content language
 DEFAULT_PRIVACY_STATUS=private
 
 # Content Settings

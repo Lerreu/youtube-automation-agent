@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { resolveLanguage, languageInstruction, regionFor } = require('../utils/content-language');
 
 class ContentStrategyAgent {
   constructor(db, credentials) {
@@ -10,10 +11,24 @@ class ContentStrategyAgent {
     this.competitorData = [];
     this.contentCalendar = [];
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
+    this.language = resolveLanguage().code;
+  }
+
+  // The channel's content language (Channel setup), re-read before each run so
+  // a change in the dashboard applies to the next video.
+  async refreshLanguage() {
+    try {
+      const profile = await this.db.getChannelProfile();
+      this.language = resolveLanguage(profile?.content_language).code;
+    } catch (_error) {
+      this.language = resolveLanguage().code;
+    }
+    return this.language;
   }
 
   async initialize() {
     this.logger.info('Initializing Content Strategy Agent...');
+    await this.refreshLanguage();
     await this.loadHistoricalData();
     await this.analyzeTrends();
     return true;
@@ -56,7 +71,7 @@ class ContentStrategyAgent {
         part: 'snippet,statistics',
         chart: 'mostPopular',
         maxResults: 50,
-        regionCode: process.env.YOUTUBE_REGION || 'US'
+        regionCode: regionFor(this.language)
       });
 
       return response.data.items.map(video => ({
@@ -228,49 +243,12 @@ class ContentStrategyAgent {
 
   async generateContentStrategy(requestedTopic = null) {
     try {
-      let topic, angle, targetAudience, contentType;
-
-      const aiStrategy = await this.generateContentStrategyWithAI(requestedTopic);
-      if (aiStrategy) {
-        await this.db.saveContentStrategy(aiStrategy);
-        this.logger.info(`Generated AI strategy for: ${aiStrategy.topic}`);
-        return aiStrategy;
-      }
-
-      this.logger.info('Using template content strategy generation');
-      if (requestedTopic) {
-        topic = requestedTopic;
-        angle = await this.generateAngle(topic);
-      } else {
-        // Select from trending topics
-        const selectedTopic = this.selectOptimalTopic();
-        topic = selectedTopic.topic;
-        angle = await this.generateAngle(topic);
-      }
-
-      // Determine target audience
-      targetAudience = await this.identifyTargetAudience(topic);
-
-      // Select content type
-      contentType = this.selectContentType(topic);
-
-      // Generate content calendar entry
-      const strategy = {
-        topic,
-        angle,
-        targetAudience,
-        contentType,
-        keywords: this.extractKeywords(topic),
-        estimatedViews: this.predictViews(topic),
-        bestPublishTime: this.calculateBestPublishTime(),
-        competitorAnalysis: this.getCompetitorInsights(topic),
-        createdAt: new Date().toISOString()
-      };
-
-      // Save to database
+      await this.refreshLanguage();
+      const strategy = await this.generateContentStrategyWithAI(requestedTopic);
+      // Every later stage (script, SEO, thumbnail, captions, upload) reads it from here.
+      strategy.language = this.language;
       await this.db.saveContentStrategy(strategy);
-
-      this.logger.info(`Generated strategy for: ${topic}`);
+      this.logger.info(`Generated AI strategy for: ${strategy.topic}`);
       return strategy;
     } catch (error) {
       this.logger.error('Failed to generate content strategy:', error);
@@ -280,6 +258,7 @@ class ContentStrategyAgent {
 
   async researchAndPlanChannel(channelStrategy) {
     const targetCount = Math.max(1, Math.min(5, Number(channelStrategy.videos_per_run || 1)));
+    await this.refreshLanguage();
     await this.analyzeTrends();
 
     const recentRows = await this.db.getAllRows(
@@ -353,10 +332,11 @@ Allowed source catalog: ${JSON.stringify(research.sourceCatalog)}
 Recent topics to avoid repeating: ${JSON.stringify(research.recentTopics)}
 Operator-approved performance learnings to apply: ${JSON.stringify(research.approvedLearnings)}
 
-Do not invent trend data, statistics, sources, URLs, or factual claims. Use only exact URLs from the supplied source catalog. Apply only the supplied approved learnings; pending or rejected recommendations are not authorized. Prefer evergreen topics when the supplied signals are weak. Learnings with category "audience_demand" are audience-requested topics mined from real comments on published videos; prefer planning a video that directly answers one when it fits the channel objective, and cite it in the rationale.`;
+Do not invent trend data, statistics, sources, URLs, or factual claims. Use only exact URLs from the supplied source catalog. Apply only the supplied approved learnings; pending or rejected recommendations are not authorized. Prefer evergreen topics when the supplied signals are weak. Learnings with category "audience_demand" are audience-requested topics mined from real comments on published videos; prefer planning a video that directly answers one when it fits the channel objective, and cite it in the rationale.
+${languageInstruction(this.language)} The "pillar" value must stay exactly as written in the supplied content pillars. Write "rationale" in Brazilian Portuguese, the operator's language.`;
 
     try {
-      const response = await this.aiTextService.generateText(prompt, { maxTokens: 1800, temperature: 0.65 });
+      const response = await this.aiTextService.generateText(prompt, { maxTokens: 4096, temperature: 0.65, json: true });
       const parsed = this.parseAIJsonResponse(response);
       return Array.isArray(parsed) ? parsed : Array.isArray(parsed.plan) ? parsed.plan : [];
     } catch (error) {
@@ -371,8 +351,10 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .map(signal => signal.topic)
       .filter(topic => topic.includes(' ') && topic.length >= 8 && !recent.has(topic.toLowerCase()));
     const pillars = channelStrategy.contentPillars || [];
-    const pillarTopics = pillars.map(pillar => `${pillar}: a practical guide for ${channelStrategy.audience}`);
-    const candidates = [...readableSignals, ...pillarTopics, ...this.getEvergreenFallbackTopics()];
+    const pillarGuide = resolveLanguage(this.language).phrases.pillarGuide;
+    const pillarTopics = pillars.map(pillar => pillarGuide(pillar, channelStrategy.audience));
+    // Only real signals and the channel's own pillars; no generic off-niche topics.
+    const candidates = [...readableSignals, ...pillarTopics];
 
     return candidates.slice(0, targetCount).map((topic, index) => ({
       topic,
@@ -422,8 +404,10 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
 
   async generateContentStrategyWithAI(requestedTopic = null) {
     if (!this.aiTextService.isAvailable()) {
-      this.logger.info('Using template content strategy generation because no AI text provider is configured');
-      return null;
+      const error = new Error('Content strategy needs an AI text provider. Configure one with npm run walkthrough.');
+      error.code = 'AI_TEXT_REQUIRED';
+      error.status = 503;
+      throw error;
     }
 
     const trendingTopics = this.trendingTopics
@@ -443,11 +427,13 @@ Return only valid JSON with this exact shape:
 Requested topic: ${requestedTopic || 'none'}
 Trending topics available: ${trendingTopics || 'Technology Trends'}
 Channel target audience: ${process.env.TARGET_AUDIENCE || 'General audience interested in educational content'}
-Avoid fabricated claims and unsupported numbers.`;
+Avoid fabricated claims and unsupported numbers.
+${languageInstruction(this.language)} When the requested topic is in another language, keep its meaning and write it in the channel language.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1000,
+        maxTokens: 2048,
+        json: true,
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);
@@ -465,18 +451,22 @@ Avoid fabricated claims and unsupported numbers.`;
       this.logger.info(`Using AI content strategy via ${this.aiTextService.providerName}`);
       return {
         topic,
-        angle: String(parsed.angle || await this.generateAngle(topic)).trim(),
+        angle: String(parsed.angle || topic).trim(),
         targetAudience: String(parsed.targetAudience || await this.identifyTargetAudience(topic)).trim(),
         contentType,
         keywords,
-        estimatedViews: this.predictViews(topic),
-        bestPublishTime: this.calculateBestPublishTime(),
+        // No view forecast or "best time": there is no evidence to support one.
+        // The operator sets the publish time at approval.
+        estimatedViews: null,
+        bestPublishTime: null,
         competitorAnalysis: this.getCompetitorInsights(topic),
         createdAt: new Date().toISOString()
       };
     } catch (error) {
-      this.logger.warn(`AI content strategy failed; using template fallback: ${error.message}`);
-      return null;
+      const failure = new Error(`AI content strategy failed: ${error.message}`);
+      failure.code = 'AI_STRATEGY_FAILED';
+      failure.cause = error;
+      throw failure;
     }
   }
 
@@ -505,67 +495,6 @@ Avoid fabricated claims and unsupported numbers.`;
 
     return allowed.has(titleCased) ? titleCased : this.selectContentType(topic);
   }
-  selectOptimalTopic() {
-    // Use scoring algorithm to select best topic
-    const recentTopics = this.getRecentTopics();
-
-    const scoredTopics = this.trendingTopics
-      .filter(topic => !recentTopics.includes(topic.topic))
-      .map(topic => ({
-        ...topic,
-        finalScore: topic.score * this.getSeasonalMultiplier(topic.topic) * this.getAudienceMultiplier(topic.topic)
-      }))
-      .sort((a, b) => b.finalScore - a.finalScore);
-
-    // Single keywords scraped from trending titles ("crown", "official") make
-    // meaningless video topics — only use a trend that reads like a real subject.
-    const readable = scoredTopics.find(t => t.topic.trim().includes(' ') && t.topic.trim().length >= 8);
-    if (readable) {
-      return readable;
-    }
-
-    const fallbackTopics = this.getEvergreenFallbackTopics();
-    const pick = fallbackTopics[Math.floor(Math.random() * fallbackTopics.length)];
-    this.logger.info(`Template mode: no readable trending topic available — using evergreen topic "${pick}"`);
-    return { topic: pick, score: 1 };
-  }
-
-  getEvergreenFallbackTopics() {
-    return [
-      'Time Management Strategies That Actually Work',
-      'Beginner Mistakes to Avoid When Learning a New Skill',
-      'How to Start a Side Project With Zero Budget',
-      'Simple Habits That Improve Focus and Productivity',
-      'How to Learn Anything Faster Using Proven Study Techniques',
-      'Practical Ways to Save Money Every Month',
-      'How Artificial Intelligence Is Changing Everyday Life',
-      'The Science of Building Habits That Stick',
-      'How to Give a Presentation People Actually Remember',
-      'Getting Started With Investing: A Beginner Roadmap',
-      'Digital Minimalism: Reclaiming Your Attention',
-      'How to Negotiate Anything: Tactics That Work',
-      'The Psychology of Procrastination and How to Beat It',
-      'Remote Work Productivity: Setting Up for Success',
-      'How to Read More Books Without Finding Extra Time'
-    ];
-  }
-
-  async generateAngle(topic) {
-    // Generate unique angle for the topic
-    const angles = [
-      `The Ultimate Guide to ${topic}`,
-      `${topic}: What Nobody Is Telling You`,
-      `How ${topic} Will Change Everything in ${new Date().getFullYear()}`,
-      `The Hidden Truth About ${topic}`,
-      `${topic} Explained in 5 Minutes`,
-      `Why ${topic} Is More Important Than You Think`,
-      `${topic}: Expert Secrets Revealed`,
-      `The Complete ${topic} Tutorial for Beginners`
-    ];
-
-    return angles[Math.floor(Math.random() * angles.length)];
-  }
-
   async identifyTargetAudience(topic) {
     // Simplified audience identification
     const audiences = {
@@ -620,43 +549,6 @@ Avoid fabricated claims and unsupported numbers.`;
     return 'Explainer';
   }
 
-  predictViews(topic) {
-    // Simplified view prediction based on topic score
-    const topicData = this.trendingTopics.find(t => t.topic === topic);
-    const baseViews = topicData ? topicData.score * 10000 : 5000;
-    const variance = baseViews * 0.3;
-    return Math.floor(baseViews + (Math.random() * variance * 2) - variance);
-  }
-
-  calculateBestPublishTime() {
-    // Analyze best publishing times
-    const bestTimes = [
-      { day: 'Tuesday', hour: 14 },
-      { day: 'Wednesday', hour: 14 },
-      { day: 'Thursday', hour: 14 },
-      { day: 'Friday', hour: 15 },
-      { day: 'Saturday', hour: 10 },
-      { day: 'Sunday', hour: 10 }
-    ];
-
-    const selected = bestTimes[Math.floor(Math.random() * bestTimes.length)];
-    const nextDate = this.getNextWeekday(selected.day);
-    nextDate.setHours(selected.hour, 0, 0, 0);
-    
-    return nextDate.toISOString();
-  }
-
-  getNextWeekday(dayName) {
-    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const targetDay = days.indexOf(dayName);
-    const today = new Date();
-    const currentDay = today.getDay();
-    const daysUntilTarget = (targetDay - currentDay + 7) % 7 || 7;
-    const nextDate = new Date(today);
-    nextDate.setDate(today.getDate() + daysUntilTarget);
-    return nextDate;
-  }
-
   getCompetitorInsights(topic) {
     // Get insights from competitor analysis
     return this.competitorData
@@ -674,51 +566,7 @@ Avoid fabricated claims and unsupported numbers.`;
       }));
   }
 
-  getRecentTopics() {
-    // Get topics used in last 7 days to avoid repetition
-    return this.historicalPerformance
-      .filter(content => {
-        const contentDate = new Date(content.createdAt);
-        const weekAgo = new Date();
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        return contentDate > weekAgo;
-      })
-      .map(content => content.topic);
-  }
 
-  getSeasonalMultiplier(topic) {
-    // Adjust score based on seasonal relevance
-    const month = new Date().getMonth();
-    const seasonalTopics = {
-      winter: ['christmas', 'holiday', 'new year', 'winter'],
-      spring: ['spring', 'easter', 'garden'],
-      summer: ['summer', 'vacation', 'beach', 'travel'],
-      fall: ['halloween', 'thanksgiving', 'autumn', 'back to school']
-    };
-
-    const season = month < 3 ? 'winter' : month < 6 ? 'spring' : month < 9 ? 'summer' : 'fall';
-    const topicLower = topic.toLowerCase();
-    
-    if (seasonalTopics[season].some(keyword => topicLower.includes(keyword))) {
-      return 1.5;
-    }
-    
-    return 1.0;
-  }
-
-  getAudienceMultiplier(topic) {
-    // Adjust score based on target audience size
-    const category = this.categorize(topic);
-    const multipliers = {
-      tech: 1.2,
-      business: 1.1,
-      education: 1.0,
-      entertainment: 1.3,
-      lifestyle: 1.15
-    };
-    
-    return multipliers[category] || 1.0;
-  }
 }
 
 module.exports = { ContentStrategyAgent };

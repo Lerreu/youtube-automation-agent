@@ -1,6 +1,6 @@
 # HTTP API
 
-The dashboard server exposes an HTTP API on the same port, `http://localhost:3456` by default. It listens on `127.0.0.1` unless you set `HOST`. When `API_KEY` is set in `.env`, every request that changes something must send it in the `x-api-key` header.
+The dashboard server exposes an HTTP API on the same port, `http://localhost:3456` by default. It listens on `127.0.0.1` unless you set `HOST`. `API_KEY` in `.env` is required: every request that changes something must send it in the `x-api-key` header, and those routes answer 503 until it is set. Requests from other sites (cross-origin `Origin` or `Sec-Fetch-Site`) are rejected with 403.
 
 ## Common requests
 

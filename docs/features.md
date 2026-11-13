@@ -98,7 +98,7 @@ The optional external adapter uses a shell-free Python child process, sends cont
 
 After publication, the agent captures comparable 24-hour and 7-day performance snapshots. It evaluates CTR, retention, engagement, watch time, format, length, hook style, and title style against the channel's own history, not a universal view-count target.
 
-Open **Analytics → What the agent learned** to review the evidence and confidence behind each recommendation. Pending or rejected recommendations never influence generation. Once you approve one, the next Autonomous Channel Operator run includes it as an explicit planning constraint. Simulated analytics fallbacks are stored as unverified and are never eligible for baselines or recommendations.
+Open **Analytics → What the agent learned** to review the evidence and confidence behind each recommendation. Pending or rejected recommendations never influence generation. Once you approve one, the next Autonomous Channel Operator run includes it as an explicit planning constraint. When YouTube Analytics is unavailable the analysis fails with `ANALYTICS_UNAVAILABLE`; no substitute numbers are stored or learned from.
 
 When an approved learning calls for better packaging, the agent prepares a control plus title and thumbnail variants for new videos. Review Studio shows those options before approval; the selected combination is the only one handed to the publishing queue. The agent does not silently swap live YouTube metadata.
 

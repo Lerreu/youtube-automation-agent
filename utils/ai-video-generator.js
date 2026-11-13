@@ -1,5 +1,4 @@
 const OpenAI = require('openai');
-const Replicate = require('replicate');
 const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
@@ -72,7 +71,6 @@ class AIVideoGenerator {
     
     // Initialize AI services with graceful fallback
     const openaiKey = resolvedCredentials.openai?.apiKey || process.env.OPENAI_API_KEY;
-    const replicateKey = resolvedCredentials.replicate?.apiKey || process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY;
     
     if (openaiKey) {
       this.openai = new OpenAI({ apiKey: openaiKey });
@@ -81,13 +79,6 @@ class AIVideoGenerator {
       this.logger.warn('OpenAI API key not found - AI features will be simulated');
     }
     
-    if (replicateKey) {
-      this.replicate = new Replicate({ auth: replicateKey });
-      this.logger.info('Replicate service initialized');
-    } else {
-      this.logger.warn('Replicate API key not found - advanced video generation unavailable');
-    }
-
     // Gemini media generation (images + native TTS) — free-tier alternative to OpenAI
     const geminiKey = resolvedCredentials.gemini?.apiKey || process.env.GEMINI_API_KEY;
     if (geminiKey) {
@@ -105,9 +96,6 @@ class AIVideoGenerator {
     this.elevenLabsVoiceId = resolvedCredentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID;
     this.elevenLabsModel = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v3';
     
-    // Azure Speech configuration
-    this.azureSpeechKey = resolvedCredentials.azure?.speechKey || process.env.AZURE_SPEECH_KEY;
-    this.azureSpeechRegion = resolvedCredentials.azure?.speechRegion || process.env.AZURE_SPEECH_REGION;
     this.mediaGeneration = options.mediaGeneration || (this.db
       ? new MediaGenerationService(this.db, resolvedCredentials, { logger: this.logger })
       : null);
@@ -523,30 +511,6 @@ class AIVideoGenerator {
     return 0;
   }
 
-  async generateReplicateVideo(script, visualAssets, audioPath, outputPath) {
-    const output = await this.replicate.run(
-      "wan-video/wan-2.7-i2v",
-      {
-        input: {
-          image: visualAssets[0],
-          prompt: script.title || "smooth cinematic motion",
-          duration: 5,
-          resolution: "720p"
-        }
-      }
-    );
-
-    // Download the generated video
-    if (output && output.length > 0) {
-      await this.downloadVideo(output[0], outputPath);
-      
-      // Add audio track
-      await this.addAudioToVideo(outputPath, audioPath, outputPath);
-    }
-
-    return outputPath;
-  }
-
   async generateSlideshowVideo(script, visualAssets, audioPath, outputPath) {
     this.logger.info('Creating slideshow video...');
 
@@ -942,8 +906,16 @@ class AIVideoGenerator {
       ? outputPath.replace(/\.mp4$/i, '_muxed.mp4')
       : outputPath;
 
-    const videoInput = options.loopVideo ? ['-stream_loop', '-1', '-i', videoPath] : ['-i', videoPath];
-    await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxPath]);
+    // A looped video copied without re-encoding never lets -shortest stop
+    // FFmpeg, which then writes an endless file. Cut a looped video at the
+    // narration's length instead.
+    let videoInput = ['-i', videoPath];
+    let length = ['-shortest'];
+    if (options.loopVideo) {
+      videoInput = ['-stream_loop', '-1', '-i', videoPath];
+      length = ['-t', (await getMediaDuration(audioPath)).toFixed(3)];
+    }
+    await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', ...length, muxPath]);
 
     if (muxPath !== outputPath) {
       await fs.rename(muxPath, outputPath);
@@ -964,22 +936,6 @@ class AIVideoGenerator {
     } catch (error) {
       return false;
     }
-  }
-
-  async downloadVideo(url, outputPath) {
-    const response = await axios({
-      method: 'GET',
-      url: url,
-      responseType: 'stream'
-    });
-
-    const writer = require('fs').createWriteStream(outputPath);
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
   }
 
   async cleanupDirectory(dirPath) {

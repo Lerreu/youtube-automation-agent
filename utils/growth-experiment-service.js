@@ -400,7 +400,13 @@ class GrowthExperimentService {
   }
 
   async captureMetrics(videoId) {
-    const report = await this.analytics.analyzeVideoPerformance(videoId, { measurementWindow: 'rolling' });
+    let report;
+    try {
+      report = await this.analytics.analyzeVideoPerformance(videoId, { measurementWindow: 'rolling' });
+    } catch (error) {
+      if (error.code !== 'ANALYTICS_UNAVAILABLE') throw error;
+      report = null;
+    }
     if (!report || report.analytics?.simulated) {
       throw this.error('Real YouTube analytics are unavailable; simulated evidence cannot advance an experiment', 409, 'EXPERIMENT_EVIDENCE_UNAVAILABLE');
     }

@@ -1,6 +1,7 @@
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const { resolveLanguage } = require('../utils/content-language');
 const { Logger } = require('../utils/logger');
 
 class ThumbnailDesignerAgent {
@@ -149,41 +150,19 @@ class ThumbnailDesignerAgent {
   }
 
   generateSecondaryText(script) {
-    if (script.metadata && script.metadata.strategy) {
-      const strategy = script.metadata.strategy;
-      
-      if (strategy.contentType === 'Tutorial') {
-        return 'STEP BY STEP';
-      } else if (strategy.contentType === 'List') {
-        return 'YOU WON\'T BELIEVE #1';
-      } else if (strategy.contentType === 'Review') {
-        return 'HONEST REVIEW';
-      }
-    }
-    
-    return 'MUST WATCH';
+    // A plain label for the format; no hype or promises the video may not keep.
+    const strategy = script.metadata?.strategy;
+    const labels = resolveLanguage(strategy?.language).phrases.formatLabels;
+    return labels[strategy?.contentType] || '';
   }
 
   selectComposition() {
-    const compositions = [
-      'rule-of-thirds',
-      'centered',
-      'diagonal',
-      'golden-ratio',
-      'symmetrical'
-    ];
-    
-    return compositions[Math.floor(Math.random() * compositions.length)];
+    return 'rule-of-thirds';
   }
 
   selectEffects() {
-    return {
-      blur: Math.random() > 0.5,
-      vignette: Math.random() > 0.7,
-      glow: Math.random() > 0.6,
-      shadow: true,
-      border: Math.random() > 0.8
-    };
+    // Only the shadow is rendered; other effects were never applied.
+    return { shadow: true };
   }
 
   async createPrompt(concept) {
@@ -280,12 +259,12 @@ class ThumbnailDesignerAgent {
         </style>
         
         <!-- Shadow -->
-        <text x="642" y="302" class="primary shadow">${concept.primaryText}</text>
-        <text x="642" y="402" class="secondary shadow">${concept.secondaryText}</text>
+        <text x="642" y="302" class="primary shadow">${this.escapeSvgText(concept.primaryText)}</text>
+        <text x="642" y="402" class="secondary shadow">${this.escapeSvgText(concept.secondaryText)}</text>
         
         <!-- Main text -->
-        <text x="640" y="300" class="primary">${concept.primaryText}</text>
-        <text x="640" y="400" class="secondary">${concept.secondaryText}</text>
+        <text x="640" y="300" class="primary">${this.escapeSvgText(concept.primaryText)}</text>
+        <text x="640" y="400" class="secondary">${this.escapeSvgText(concept.secondaryText)}</text>
       </svg>
     `;
     
@@ -351,8 +330,8 @@ class ThumbnailDesignerAgent {
         }
       },
       {
-        label: 'Alternate promise',
-        concept: { ...concept, primaryText: this.generateAlternativeText(concept.primaryText) }
+        label: 'Alternate keyword',
+        concept: { ...concept, primaryText: this.generateAlternativeText(concept.primaryText, concept.title) }
       },
       {
         label: 'Centered composition',
@@ -371,17 +350,22 @@ class ThumbnailDesignerAgent {
     return variants;
   }
 
-  generateAlternativeText(originalText) {
-    const alternatives = {
-      'HOW': 'WHY',
-      'BEST': 'TOP',
-      'GUIDE': 'SECRETS',
-      'TRUTH': 'FACTS',
-      'ULTIMATE': 'COMPLETE'
-    };
-    
-    return alternatives[originalText] || originalText + '!';
+  generateAlternativeText(originalText, title = '') {
+    // Use another real word from the title instead of swapping in hype words.
+    const words = String(title).split(/\s+/).map(word => word.replace(/[^\p{L}\p{N}]/gu, ''))
+      .filter(word => word.length > 3 && word.toUpperCase() !== originalText);
+    return words.length ? words[0].toUpperCase() : originalText;
   }
+
+  escapeSvgText(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;');
+  }
+
 }
 
 module.exports = { ThumbnailDesignerAgent };
