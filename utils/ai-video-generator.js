@@ -906,8 +906,16 @@ class AIVideoGenerator {
       ? outputPath.replace(/\.mp4$/i, '_muxed.mp4')
       : outputPath;
 
-    const videoInput = options.loopVideo ? ['-stream_loop', '-1', '-i', videoPath] : ['-i', videoPath];
-    await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxPath]);
+    // A looped video copied without re-encoding never lets -shortest stop
+    // FFmpeg, which then writes an endless file. Cut a looped video at the
+    // narration's length instead.
+    let videoInput = ['-i', videoPath];
+    let length = ['-shortest'];
+    if (options.loopVideo) {
+      videoInput = ['-stream_loop', '-1', '-i', videoPath];
+      length = ['-t', (await getMediaDuration(audioPath)).toFixed(3)];
+    }
+    await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', ...length, muxPath]);
 
     if (muxPath !== outputPath) {
       await fs.rename(muxPath, outputPath);

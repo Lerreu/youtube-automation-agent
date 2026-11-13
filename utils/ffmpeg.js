@@ -41,8 +41,13 @@ async function checkFFmpeg() {
   }
 }
 
+// Upper bound for one FFmpeg run, so a stuck encode is stopped instead of
+// running (and writing to disk) forever. FFMPEG_TIMEOUT_MS overrides it.
+const DEFAULT_FFMPEG_TIMEOUT_MS = 30 * 60 * 1000;
+
 async function runFFmpeg(args) {
-  return execFileAsync(getFFmpegPath(), args, { maxBuffer: 32 * 1024 * 1024 });
+  const timeout = Number(process.env.FFMPEG_TIMEOUT_MS) || DEFAULT_FFMPEG_TIMEOUT_MS;
+  return execFileAsync(getFFmpegPath(), args, { maxBuffer: 32 * 1024 * 1024, timeout, killSignal: 'SIGKILL' });
 }
 
 function getFFprobePath() {

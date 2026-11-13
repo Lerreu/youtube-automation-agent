@@ -686,7 +686,7 @@ const mediaTests = {
 
   async testSlideshowRenderer() {
     const { AIVideoGenerator } = require('../../utils/ai-video-generator');
-    const { checkFFmpeg, getMediaDuration } = require('../../utils/ffmpeg');
+    const { checkFFmpeg, getMediaDuration, runFFmpeg } = require('../../utils/ffmpeg');
     const fs = require('fs').promises;
     const os = require('os');
 
@@ -792,6 +792,19 @@ const mediaTests = {
         throw new Error(`Looped provider clip did not fill its 2.5s slot exactly; timeline is ${loopedDuration}s`);
       }
       if (Date.now() - loopStarted > 60000) throw new Error('Looped provider clip input was not bounded');
+
+      // Muxing a looped short video with longer narration must stop at the
+      // narration's length; -shortest alone never stops a copied looped stream.
+      const narrationPath = path.join(dir, 'narration.m4a');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-c:a', 'aac', narrationPath]);
+      const muxedPath = path.join(dir, 'muxed.mp4');
+      const muxStarted = Date.now();
+      await generator.addAudioToVideo(shortClipPath, narrationPath, muxedPath, { loopVideo: true });
+      const muxedDuration = await getMediaDuration(muxedPath);
+      if (muxedDuration < 3.8 || muxedDuration > 4.3) {
+        throw new Error(`Looped video was not cut at the 4s narration; final video is ${muxedDuration}s`);
+      }
+      if (Date.now() - muxStarted > 60000) throw new Error('Looped video mux did not stop at the narration length');
     } finally {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
