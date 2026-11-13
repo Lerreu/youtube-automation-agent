@@ -336,7 +336,7 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
 ${languageInstruction(this.language)} The "pillar" value must stay exactly as written in the supplied content pillars. Write "rationale" in Brazilian Portuguese, the operator's language.`;
 
     try {
-      const response = await this.aiTextService.generateText(prompt, { maxTokens: 1800, temperature: 0.65 });
+      const response = await this.aiTextService.generateText(prompt, { maxTokens: 4096, temperature: 0.65, json: true });
       const parsed = this.parseAIJsonResponse(response);
       return Array.isArray(parsed) ? parsed : Array.isArray(parsed.plan) ? parsed.plan : [];
     } catch (error) {
@@ -432,7 +432,8 @@ ${languageInstruction(this.language)} When the requested topic is in another lan
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1000,
+        maxTokens: 2048,
+        json: true,
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);

@@ -958,6 +958,31 @@ const mediaTests = {
       if (geminiCalls[0].config.temperature !== 0.2) {
         throw new Error('Gemini 3.1 lost its temperature parameter');
       }
+
+      // A reply cut at the output limit (half a JSON document) is retried once
+      // with a larger budget, in JSON mode when asked; a second cut is an error.
+      const truncated = { text: '{"title": "Meio roteiro', candidates: [{ finishReason: 'MAX_TOKENS' }] };
+      const complete = { text: '{"title": "Roteiro"}', candidates: [{ finishReason: 'STOP' }] };
+      let replies = [truncated, complete];
+      geminiCalls.length = 0;
+      geminiService.model = 'gemini-3.8-flash';
+      geminiService.gemini.models.generateContent = async params => {
+        geminiCalls.push(params);
+        return replies.shift();
+      };
+      const recovered = await geminiService.generateText('script', { maxTokens: 1000, json: true });
+      if (recovered !== complete.text || geminiCalls.length !== 2 || geminiCalls[1].config.maxOutputTokens !== 4000) {
+        throw new Error('A truncated Gemini reply was not retried with a larger budget');
+      }
+      if (geminiCalls[0].config.responseMimeType !== 'application/json') throw new Error('JSON mode was not requested');
+      replies = [truncated, truncated];
+      let cutOff = false;
+      try {
+        await geminiService.generateText('script', { maxTokens: 1000, json: true });
+      } catch (error) {
+        cutOff = /output limit/.test(error.message);
+      }
+      if (!cutOff) throw new Error('A reply still truncated after the retry was returned as if complete');
     } finally {
       if (savedEnv === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = savedEnv;

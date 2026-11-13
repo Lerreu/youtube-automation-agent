@@ -105,7 +105,8 @@ ${languageInstruction(strategy.language)} The script is narrated as written, so 
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1800,
+        maxTokens: 8192,
+        json: true,
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);

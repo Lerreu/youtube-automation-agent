@@ -94,7 +94,8 @@ ${languageInstruction(strategy.language)} Tags must be search terms that speaker
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1400,
+        maxTokens: 2048,
+        json: true,
         temperature: 0.6
       });
       const parsed = this.parseAIJsonResponse(response);

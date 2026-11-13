@@ -165,6 +165,8 @@ class AITextService {
     if (backend.gemini) {
       const config = { maxOutputTokens: maxTokens };
       if (!/^gemini-(?:3\.(?:[5-9]|\d{2,})|[4-9]|\d{2,})[.-]/.test(model)) config.temperature = temperature;
+      // JSON mode: Gemini returns a syntactically valid JSON document.
+      if (options.json) config.responseMimeType = 'application/json';
       let response = await backend.gemini.models.generateContent({
         model,
         contents: prompt,
@@ -173,20 +175,25 @@ class AITextService {
       let text = response && response.text;
 
       // Thinking models (gemini-3.x flash/pro) count thoughts against
-      // maxOutputTokens, so a small budget can be spent before any text is
-      // written. Retry once with room for the thoughts plus the answer.
-      if (!this._hasText(text) && this._geminiFinishReason(response) === 'MAX_TOKENS') {
-        const retryTokens = Math.max(maxTokens * 4, GEMINI_THINKING_RETRY_MIN_TOKENS);
+      // maxOutputTokens, so a budget can be spent before any text is written
+      // or before the answer is finished (a JSON document cut in half).
+      // Retry once with room for the thoughts plus the whole answer.
+      let budget = maxTokens;
+      if (this._geminiFinishReason(response) === 'MAX_TOKENS') {
+        budget = Math.max(maxTokens * 4, GEMINI_THINKING_RETRY_MIN_TOKENS);
         response = await backend.gemini.models.generateContent({
           model,
           contents: prompt,
-          config: { ...config, maxOutputTokens: retryTokens },
+          config: { ...config, maxOutputTokens: budget },
         });
         text = response && response.text;
       }
 
       if (!this._hasText(text)) {
         throw new Error(this._geminiEmptyResponseMessage(response, backend.name));
+      }
+      if (this._geminiFinishReason(response) === 'MAX_TOKENS') {
+        throw new Error(`${backend.name} stopped at its ${budget}-token output limit before finishing the answer. Choose a shorter video length or a model that does not think.`);
       }
       return text;
     }
@@ -283,6 +290,10 @@ class AITextService {
       throw new Error(
         `${name} returned an empty response. Check the API key and model quota.`
       );
+    }
+    // A reply cut at the token limit is unusable (half a JSON document).
+    if (response.choices[0].finish_reason === 'length') {
+      throw new Error(`${name} stopped at its output limit before finishing the answer. Choose a shorter video length or raise the token budget.`);
     }
     return content;
   }
